@@ -226,6 +226,7 @@ const Connection = struct {
     // Holds low-level statistics.
     statistics: struct {
         connect_time: i64 = 0,
+        bytes_recv: usize = 0,
         bytes_sent: usize = 0,
     } = .{},
 
@@ -438,6 +439,8 @@ pub fn main() anyerror!void {
                         try connection.prepClose(&ring);
                     } else {
                         const recv = @intCast(usize, cqe.res);
+                        connection.statistics.bytes_recv += recv;
+
                         const data = connection.temp_buffer[0..recv];
 
                         const previous_buffer_len = connection.buffer.items.len;
@@ -471,9 +474,10 @@ pub fn main() anyerror!void {
 
                     const elapsed = time.milliTimestamp() - connection.statistics.connect_time;
 
-                    logger.info("CLOSE host={} fd={} total sent={s} elapsed={s}", .{
+                    logger.info("CLOSE host={} fd={} totalrecv={s} totalsent={s} elapsed={s}", .{
                         connection.addr,
                         op.socket,
+                        fmt.fmtIntSizeBin(@intCast(u64, connection.statistics.bytes_recv)),
                         fmt.fmtIntSizeBin(@intCast(u64, connection.statistics.bytes_sent)),
                         fmt.fmtDuration(@intCast(u64, elapsed * time.ns_per_ms)),
                     });
@@ -515,14 +519,13 @@ pub fn main() anyerror!void {
                         try connection.prepClose(&ring);
                     } else {
                         const sent = @intCast(usize, cqe.res);
+                        connection.statistics.bytes_sent += sent;
 
                         logger.debug("SENT host={} fd={} ({s})", .{
                             connection.addr,
                             connection.socket,
                             fmt.fmtIntSizeBin(sent),
                         });
-
-                        connection.statistics.bytes_sent += sent;
                     }
                 },
             }
