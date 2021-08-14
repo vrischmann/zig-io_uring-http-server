@@ -1,0 +1,3 @@
+*.c linguist-vendored
+*.h linguist-vendored
+*.zig text=auto eol=lf
