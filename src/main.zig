@@ -341,6 +341,8 @@ pub fn main() anyerror!void {
     // Create the server
     const server_fd = try createServer(3405);
 
+    logger.info("listening on :3405\n", .{});
+
     // Create the ring
     var cqes: [max_ring_entries]io_uring_cqe = undefined;
 
@@ -460,6 +462,8 @@ pub fn main() anyerror!void {
                         if (try parseRequest(previous_buffer_len, connection.buffer.items)) |result| {
                             const req = result.req;
                             _ = req;
+
+                            logger.info("got request", .{});
                         }
 
                         // Enqueue a new recv request
