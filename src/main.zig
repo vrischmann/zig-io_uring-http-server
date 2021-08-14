@@ -14,7 +14,7 @@ const IO_Uring = std.os.linux.IO_Uring;
 const io_uring_cqe = std.os.linux.io_uring_cqe;
 
 const max_ring_entries = 512;
-const max_buffer_size = 4096;
+const max_buffer_size = 8;
 
 const c = @cImport({
     @cInclude("picohttpparser.h");
@@ -28,6 +28,8 @@ const Header = struct {
 /// Request type contains fields populated by picohttpparser and provides
 /// helpers methods for easier use with Zig.
 const Request = struct {
+    const Self = @This();
+
     const max_headers = 100;
 
     method: [*c]u8 = undefined,
@@ -38,32 +40,35 @@ const Request = struct {
     headers: [max_headers]c.phr_header = undefined,
     num_headers: usize = max_headers,
 
-    pub fn getMethod(self: @This()) []const u8 {
+    pub fn getMethod(self: Self) []const u8 {
         return self.method[0..self.method_len];
     }
 
-    pub fn getPath(self: @This()) []const u8 {
+    pub fn getPath(self: Self) []const u8 {
         return self.path[0..self.path_len];
     }
 
-    pub fn getMinorVersion(self: @This()) usize {
+    pub fn getMinorVersion(self: Self) usize {
         return @intCast(usize, self.minor_version);
     }
 
-    pub fn getHeaders(self: @This(), allocator: *mem.Allocator) ![]const Header {
-        var res = try allocator.alloc(Header, self.num_headers);
-
+    pub fn iterateHeaders(self: Self, comptime f: anytype) blk: {
+        const ReturnType = @typeInfo(@TypeOf(f)).Fn.return_type.?;
+        break :blk ReturnType;
+    } {
         var i: usize = 0;
         while (i < self.num_headers) : (i += 1) {
             const hdr = self.headers[i];
 
-            res[i] = .{
-                .name = hdr.name[0..hdr.name_len],
-                .value = hdr.value[0..hdr.value_len],
-            };
-        }
+            const name = hdr.name[0..hdr.name_len];
+            const value = hdr.value[0..hdr.value_len];
 
-        return res;
+            const result_or_null = try @call(.{}, f, .{ name, value });
+            if (result_or_null) |result| {
+                return result;
+            }
+        }
+        return null;
     }
 };
 
@@ -179,6 +184,25 @@ const Operation = union(enum) {
     },
 };
 
+const HTTPHandlingState = struct {
+    const Self = @This();
+
+    // The current state in request handling.
+    state: enum {
+        reading_request,
+        reading_body,
+        write_response,
+    } = .reading_request,
+
+    request_body: union(enum) {
+        fixed_size: struct {
+            size: usize,
+            current_data: []const u8,
+        },
+        none,
+    } = .none,
+};
+
 const Connection = struct {
     const Self = @This();
 
@@ -210,18 +234,8 @@ const Connection = struct {
     // For example, a complete HTTP request.
     buffer: std.ArrayList(u8),
 
-    // Holds state for HTTP request parsing.
-    http_request: struct {
-        // The current state in request parsing.
-        state: enum {
-            reading_request,
-            reading_body,
-            write_response,
-        } = .reading_request,
-
-        content_length: usize = 0,
-        remaining_body_to_read: usize = 0,
-    } = .{},
+    // Holds state for HTTP handling.
+    http_handling: HTTPHandlingState = .{},
 
     // Holds low-level statistics.
     statistics: struct {
@@ -269,6 +283,14 @@ const Connection = struct {
             .parent = .connection,
         };
         try self.close_completion.prep();
+    }
+
+    fn isBodyComplete(self: *Self) bool {
+        const content_length = self.http_handling.content_length orelse return true;
+
+        _ = content_length;
+
+        unreachable;
     }
 };
 
@@ -458,12 +480,61 @@ pub fn main() anyerror!void {
                             fmt.fmtIntSizeBin(data.len),
                         });
 
-                        // Try to parse the request
-                        if (try parseRequest(previous_buffer_len, connection.buffer.items)) |result| {
-                            const req = result.req;
-                            _ = req;
+                        switch (connection.http_handling.state) {
+                            .reading_request => if (try parseRequest(previous_buffer_len, connection.buffer.items)) |result| {
+                                // Trim the request data consumed by the parser
+                                try connection.buffer.replaceRange(0, result.consumed, &[0]u8{});
 
-                            logger.info("got request", .{});
+                                logger.info("got request", .{});
+
+                                // Avoid allocating data
+                                const content_length_or_null = try result.req.iterateHeaders(
+                                    struct {
+                                        fn do(name: []const u8, value: []const u8) !?usize {
+                                            if (!mem.eql(u8, "Content-Length", name)) return null;
+
+                                            return try fmt.parseInt(usize, value, 10);
+                                        }
+                                    }.do,
+                                );
+
+                                if (content_length_or_null) |content_length| {
+                                    logger.debug("content length: {d}", .{content_length});
+
+                                    connection.http_handling.request_body = .{
+                                        .fixed_size = .{
+                                            .size = content_length,
+                                            .current_data = connection.buffer.items,
+                                        },
+                                    };
+                                }
+
+                                // Switch to reading the remaining body data.
+                                connection.http_handling.state = .reading_body;
+                            },
+                            .reading_body => {
+                                switch (connection.http_handling.request_body) {
+                                    .fixed_size => |body| if (body.current_data.len < body.size) {
+                                        logger.debug("BODY INCOMPLETE data={s}", .{
+                                            fmt.fmtSliceEscapeLower(body.current_data),
+                                        });
+                                    } else {
+                                        logger.info("BODY COMPLETE data={s}", .{
+                                            fmt.fmtSliceEscapeLower(body.current_data),
+                                        });
+
+                                        // Switch to reading a new request.
+                                        connection.http_handling.state = .reading_request;
+                                    },
+                                    .none => {
+                                        // Switch to reading a new request.
+                                        connection.http_handling.state = .reading_request;
+                                    },
+                                }
+                            },
+                            else => {
+                                std.debug.panic("invalid state {}\n", .{connection.http_handling.state});
+                            },
                         }
 
                         // Enqueue a new recv request
