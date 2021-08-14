@@ -284,14 +284,6 @@ const Connection = struct {
         };
         try self.close_completion.prep();
     }
-
-    fn isBodyComplete(self: *Self) bool {
-        const content_length = self.http_handling.content_length orelse return true;
-
-        _ = content_length;
-
-        unreachable;
-    }
 };
 
 fn createServer(port: u16) !os.socket_t {
