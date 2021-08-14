@@ -201,10 +201,25 @@ const HTTPHandlingState = struct {
         },
         none,
     } = .none,
+
+    // TODO(vincent): split response headers and stuff from actual body ?
+    response_body: []const u8 = "",
+
+    pub fn resetBodies(self: *Self) void {
+        self.request_body = .none;
+        self.response_body = "";
+    }
 };
 
 const Connection = struct {
     const Self = @This();
+
+    // Holds low-level statistics.
+    statistics: struct {
+        connect_time: i64 = 0,
+        bytes_recv: usize = 0,
+        bytes_sent: usize = 0,
+    } = .{},
 
     // Holds the connection state.
     state: enum {
@@ -237,12 +252,11 @@ const Connection = struct {
     // Holds state for HTTP handling.
     http_handling: HTTPHandlingState = .{},
 
-    // Holds low-level statistics.
-    statistics: struct {
-        connect_time: i64 = 0,
-        bytes_recv: usize = 0,
-        bytes_sent: usize = 0,
-    } = .{},
+    // Resets both temporary buffer and dynamic buffer.
+    fn resetBuffer(self: *Self) void {
+        mem.set(u8, &self.temp_buffer, undefined);
+        self.buffer.clearRetainingCapacity();
+    }
 
     fn prepRecv(self: *Self, ring: *IO_Uring) !void {
         self.recv_completion = .{
@@ -408,9 +422,11 @@ pub fn main() anyerror!void {
                             continue;
                         };
 
-                        connection.addr = net.Address{ .any = op.addr };
-                        connection.socket = @intCast(os.socket_t, cqe.res);
                         connection.statistics.connect_time = time.milliTimestamp();
+
+                        connection.socket = @intCast(os.socket_t, cqe.res);
+                        connection.addr.any = op.addr;
+                        connection.resetBuffer();
 
                         logger.info("ACCEPT fd={} host={}", .{
                             connection.socket,
@@ -454,14 +470,17 @@ pub fn main() anyerror!void {
                         connection.state = .terminating;
                         try connection.prepClose(&ring);
                     } else {
+                        // If not an error this is the number of bytes received.
                         const recv = @intCast(usize, cqe.res);
                         connection.statistics.bytes_recv += recv;
 
+                        // Get a slice of the received data.
                         const data = connection.temp_buffer[0..recv];
 
+                        // Used by picohttpparser.
                         const previous_buffer_len = connection.buffer.items.len;
 
-                        // Append data to complete request buffer
+                        // Append the received data to the full data buffer.
                         try connection.buffer.appendSlice(data);
 
                         logger.info("RECV host={} fd={} data={s} fulldata={s} ({s})", .{
@@ -472,14 +491,30 @@ pub fn main() anyerror!void {
                             fmt.fmtIntSizeBin(data.len),
                         });
 
+                        // Start handling the received data.
+                        //
+                        // The HTTP handling can be in two states currently:
+                        // * reading a request
+                        // * reading the body of a request
+                        //
+                        // The handler starts by reading a request; it stays in this state until a request has been parsed
+                        // or the buffer gets too big.
+                        //
+                        // When parsing a request successfully, the next step is to read the body if there is one.
+                        // TODO(vincent): currently only body defined by a Content-Length header are handled; chunked encoding doesn't work.
+
                         switch (connection.http_handling.state) {
                             .reading_request => if (try parseRequest(previous_buffer_len, connection.buffer.items)) |result| {
                                 // Trim the request data consumed by the parser
                                 try connection.buffer.replaceRange(0, result.consumed, &[0]u8{});
 
-                                logger.info("got request", .{});
+                                logger.info("got request, method={s} path={s}", .{
+                                    result.req.getMethod(),
+                                    result.req.getPath(),
+                                });
 
-                                // Avoid allocating data
+                                // Get the Content-Length if it exists.
+                                // TODO(vincent): also handle chunked encoding ?
                                 const content_length_or_null = try result.req.iterateHeaders(
                                     struct {
                                         fn do(name: []const u8, value: []const u8) !?usize {
@@ -499,28 +534,66 @@ pub fn main() anyerror!void {
                                             .current_data = connection.buffer.items,
                                         },
                                     };
-                                }
 
-                                // Switch to reading the remaining body data.
-                                connection.http_handling.state = .reading_body;
+                                    // Switch to reading the remaining body data.
+                                    connection.http_handling.state = .reading_body;
+
+                                    // Enqueue a new recv request
+                                    try connection.prepRecv(&ring);
+                                } else {
+                                    // No body expected: switch to writing the response
+                                    // TODO(vincent): get the response somewhere ?
+
+                                    connection.http_handling.response_body = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+                                    connection.http_handling.state = .write_response;
+
+                                    // Enqueue a new send request
+                                    try connection.prepSend(&ring, connection.http_handling.response_body);
+                                }
+                            } else {
+                                // Incomplete request, expect more data
+
+                                // Enqueue a new recv request
+                                try connection.prepRecv(&ring);
                             },
                             .reading_body => {
-                                switch (connection.http_handling.request_body) {
-                                    .fixed_size => |body| if (body.current_data.len < body.size) {
-                                        logger.debug("BODY INCOMPLETE data={s}", .{
-                                            fmt.fmtSliceEscapeLower(body.current_data),
-                                        });
-                                    } else {
-                                        logger.info("BODY COMPLETE data={s}", .{
-                                            fmt.fmtSliceEscapeLower(body.current_data),
-                                        });
+                                // We're reading the body, defined what to do based on the type of body we're handling.
+                                //
+                                // A body can be:
+                                // * a blob of data of a fixed size, defined by the Content-Length header
+                                // * data chunked using the chunked encoding
+                                // TODO(vincent): currently only fixed size body is handled.
 
-                                        // Switch to reading a new request.
-                                        connection.http_handling.state = .reading_request;
+                                switch (connection.http_handling.request_body) {
+                                    .fixed_size => |body| {
+                                        if (body.current_data.len < body.size) {
+                                            logger.debug("BODY INCOMPLETE data={s}", .{
+                                                fmt.fmtSliceEscapeLower(body.current_data),
+                                            });
+
+                                            // Enqueue a new recv request
+                                            try connection.prepRecv(&ring);
+                                        } else {
+                                            logger.info("BODY COMPLETE data={s}", .{
+                                                fmt.fmtSliceEscapeLower(body.current_data),
+                                            });
+
+                                            // Switch to writing the response
+                                            // TODO(vincent): get the response somewhere ?
+
+                                            connection.http_handling.response_body = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+                                            connection.http_handling.state = .write_response;
+
+                                            // Enqueue a new send request
+                                            try connection.prepSend(&ring, connection.http_handling.response_body);
+                                        }
                                     },
                                     .none => {
                                         // Switch to reading a new request.
                                         connection.http_handling.state = .reading_request;
+
+                                        // Enqueue a new recv request
+                                        try connection.prepRecv(&ring);
                                     },
                                 }
                             },
@@ -528,9 +601,6 @@ pub fn main() anyerror!void {
                                 std.debug.panic("invalid state {}\n", .{connection.http_handling.state});
                             },
                         }
-
-                        // Enqueue a new recv request
-                        try connection.prepRecv(&ring);
                     }
                 },
                 .close => |*op| {
@@ -585,14 +655,37 @@ pub fn main() anyerror!void {
                         connection.state = .terminating;
                         try connection.prepClose(&ring);
                     } else {
+                        // If not an error this is the number of bytes received.
                         const sent = @intCast(usize, cqe.res);
                         connection.statistics.bytes_sent += sent;
 
-                        logger.debug("SENT host={} fd={} ({s})", .{
+                        // Can only ever send data if we're in the write_response state.
+                        assert(connection.http_handling.state == .write_response);
+
+                        logger.info("SENT host={} fd={} ({s})", .{
                             connection.addr,
                             connection.socket,
                             fmt.fmtIntSizeBin(sent),
                         });
+
+                        //
+
+                        // It's possible we sent less data than the slice we need to write.
+                        // If that is the case, get the remaining data slice and enqueue a new send request.
+                        if (sent < connection.http_handling.response_body.len) {
+                            const remaining_data = connection.http_handling.response_body[sent..];
+
+                            connection.http_handling.response_body = remaining_data;
+
+                            // Enqueue a new send request
+                            try connection.prepSend(&ring, connection.http_handling.response_body);
+                        } else {
+                            // Switch to reading a new request.
+                            connection.http_handling.state = .reading_request;
+
+                            // Enqueue a new recv request
+                            try connection.prepRecv(&ring);
+                        }
                     }
                 },
             }
