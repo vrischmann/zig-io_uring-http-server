@@ -14,7 +14,7 @@ const IO_Uring = std.os.linux.IO_Uring;
 const io_uring_cqe = std.os.linux.io_uring_cqe;
 
 const max_ring_entries = 512;
-const max_buffer_size = 8;
+const max_buffer_size = 4096;
 
 const c = @cImport({
     @cInclude("picohttpparser.h");
@@ -243,6 +243,7 @@ const Connection = struct {
     send_completion: Completion = undefined,
     close_completion: Completion = undefined,
 
+    // TODO(vincent): make this request specific ? and add other state for the response ?
     // Temporary buffer used for reading data
     temp_buffer: [max_buffer_size]u8 = undefined,
     // Dynamic buffer used to hold data across multiple read or write calls.
@@ -253,6 +254,7 @@ const Connection = struct {
     http_handling: HTTPHandlingState = .{},
 
     // Resets both temporary buffer and dynamic buffer.
+    // TODO(vincent): better naming ?
     fn resetBuffer(self: *Self) void {
         mem.set(u8, &self.temp_buffer, undefined);
         self.buffer.clearRetainingCapacity();
@@ -486,8 +488,8 @@ pub fn main() anyerror!void {
                         logger.info("RECV host={} fd={} data={s} fulldata={s} ({s})", .{
                             connection.addr,
                             connection.socket,
-                            fmt.fmtSliceEscapeLower(data),
-                            fmt.fmtSliceEscapeLower(connection.buffer.items),
+                            fmt.fmtSliceEscapeLower(data[0..std.math.min(data.len, 8)]),
+                            fmt.fmtSliceEscapeLower(connection.buffer.items[0..std.math.min(connection.buffer.items.len, 16)]),
                             fmt.fmtIntSizeBin(data.len),
                         });
 
@@ -505,9 +507,6 @@ pub fn main() anyerror!void {
 
                         switch (connection.http_handling.state) {
                             .reading_request => if (try parseRequest(previous_buffer_len, connection.buffer.items)) |result| {
-                                // Trim the request data consumed by the parser
-                                try connection.buffer.replaceRange(0, result.consumed, &[0]u8{});
-
                                 logger.info("got request, method={s} path={s}", .{
                                     result.req.getMethod(),
                                     result.req.getPath(),
@@ -524,6 +523,9 @@ pub fn main() anyerror!void {
                                         }
                                     }.do,
                                 );
+
+                                // Trim the request data consumed by the parser
+                                try connection.buffer.replaceRange(0, result.consumed, &[0]u8{});
 
                                 if (content_length_or_null) |content_length| {
                                     logger.debug("content length: {d}", .{content_length});
@@ -565,11 +567,11 @@ pub fn main() anyerror!void {
                                 // TODO(vincent): currently only fixed size body is handled.
 
                                 switch (connection.http_handling.request_body) {
-                                    .fixed_size => |body| {
+                                    .fixed_size => |*body| {
+                                        body.current_data = connection.buffer.items;
+
                                         if (body.current_data.len < body.size) {
-                                            logger.debug("BODY INCOMPLETE data={s}", .{
-                                                fmt.fmtSliceEscapeLower(body.current_data),
-                                            });
+                                            // Not done, keep reading data
 
                                             // Enqueue a new recv request
                                             try connection.prepRecv(&ring);
@@ -583,6 +585,9 @@ pub fn main() anyerror!void {
 
                                             connection.http_handling.response_body = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
                                             connection.http_handling.state = .write_response;
+
+                                            // Clear the request data.
+                                            connection.resetBuffer();
 
                                             // Enqueue a new send request
                                             try connection.prepSend(&ring, connection.http_handling.response_body);
