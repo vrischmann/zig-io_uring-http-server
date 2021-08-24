@@ -15,6 +15,7 @@ const io_uring_cqe = std.os.linux.io_uring_cqe;
 
 const max_ring_entries = 512;
 const max_buffer_size = 4096;
+const max_connections = 2;
 
 const c = @cImport({
     @cInclude("picohttpparser.h");
@@ -396,7 +397,7 @@ pub fn main() anyerror!void {
 
     var allocator = &gpa.allocator;
 
-    var connections = try allocator.alloc(Connection, 8);
+    var connections = try allocator.alloc(Connection, max_connections);
     for (connections) |*connection| {
         connection.* = .{
             .buffer = std.ArrayList(u8).init(allocator),
