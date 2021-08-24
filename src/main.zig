@@ -200,13 +200,15 @@ const Operation = union(enum) {
         buffer: []u8,
     };
 
+    const Send = struct {
+        socket: os.socket_t,
+        buffer: []const u8,
+    };
+
     accept: Accept,
     recv: Recv,
     close: Close,
-    send: struct {
-        socket: os.socket_t,
-        buffer: []const u8,
-    },
+    send: Send,
 };
 
 const HTTPHandlingState = struct {
@@ -624,6 +626,79 @@ fn handleRecv(ring: *IO_Uring, completion: *Completion, res: i32, op: *Operation
     }
 }
 
+const SendError = error{
+    // from IO_Uring.get_sqe
+    SubmissionQueueFull,
+};
+
+fn handleSend(ring: *IO_Uring, completion: *Completion, res: i32, op: *Operation.Send) SendError!void {
+    var connection = @fieldParentPtr(Connection, "send_completion", completion);
+    assert(connection.state == .connected);
+
+    // handle errors
+    if (res <= 0) {
+        if (res == 0) {
+            logger.info("SEND host={} fd={} end of file", .{
+                connection.addr,
+                op.socket,
+            });
+        } else {
+            switch (@intToEnum(os.E, -res)) {
+                .PIPE => logger.info("SEND host={} fd={} broken pipe", .{
+                    connection.addr,
+                    op.socket,
+                }),
+                .CONNRESET => logger.info("SEND host={} fd={} reset by peer", .{
+                    connection.addr,
+                    op.socket,
+                }),
+                else => logger.warn("SEND host={} fd={} errno {d}", .{
+                    connection.addr,
+                    op.socket,
+                    res,
+                }),
+            }
+        }
+
+        connection.state = .terminating;
+        try connection.prepClose(ring);
+
+        return;
+    }
+
+    // If not an error this is the number of bytes received.
+    const sent = @intCast(usize, res);
+    connection.statistics.bytes_sent += sent;
+
+    // Can only ever send data if we're in the write_response state.
+    assert(connection.http_handling.state == .write_response);
+
+    logger.info("SENT host={} fd={} ({s})", .{
+        connection.addr,
+        connection.socket,
+        fmt.fmtIntSizeBin(sent),
+    });
+
+    //
+
+    // It's possible we sent less data than the slice we need to write.
+    // If that is the case, get the remaining data slice and enqueue a new send request.
+    if (sent < connection.http_handling.response_body.len) {
+        const remaining_data = connection.http_handling.response_body[sent..];
+
+        connection.http_handling.response_body = remaining_data;
+
+        // Enqueue a new send request
+        try connection.prepSend(ring, connection.http_handling.response_body);
+    } else {
+        // Switch to reading a new request.
+        connection.http_handling.state = .reading_request;
+
+        // Enqueue a new recv request
+        try connection.prepRecv(ring);
+    }
+}
+
 // State for accepting new connections on a listener socket.
 var global_accept: struct {
     completion: Completion = undefined,
@@ -724,69 +799,7 @@ pub fn main() anyerror!void {
                 .send => |*op| {
                     assert(completion.parent == .connection);
 
-                    var connection = @fieldParentPtr(Connection, "send_completion", completion);
-                    assert(connection.state == .connected);
-
-                    // handle errors
-                    if (cqe.res <= 0) {
-                        if (cqe.res == 0) {
-                            logger.info("SEND host={} fd={} end of file", .{
-                                connection.addr,
-                                op.socket,
-                            });
-                        } else {
-                            switch (@intToEnum(os.E, -cqe.res)) {
-                                .PIPE => logger.info("SEND host={} fd={} broken pipe", .{
-                                    connection.addr,
-                                    op.socket,
-                                }),
-                                .CONNRESET => logger.info("SEND host={} fd={} reset by peer", .{
-                                    connection.addr,
-                                    op.socket,
-                                }),
-                                else => logger.warn("SEND host={} fd={} errno {d}", .{
-                                    connection.addr,
-                                    op.socket,
-                                    cqe.res,
-                                }),
-                            }
-                        }
-
-                        connection.state = .terminating;
-                        try connection.prepClose(&ring);
-                    } else {
-                        // If not an error this is the number of bytes received.
-                        const sent = @intCast(usize, cqe.res);
-                        connection.statistics.bytes_sent += sent;
-
-                        // Can only ever send data if we're in the write_response state.
-                        assert(connection.http_handling.state == .write_response);
-
-                        logger.info("SENT host={} fd={} ({s})", .{
-                            connection.addr,
-                            connection.socket,
-                            fmt.fmtIntSizeBin(sent),
-                        });
-
-                        //
-
-                        // It's possible we sent less data than the slice we need to write.
-                        // If that is the case, get the remaining data slice and enqueue a new send request.
-                        if (sent < connection.http_handling.response_body.len) {
-                            const remaining_data = connection.http_handling.response_body[sent..];
-
-                            connection.http_handling.response_body = remaining_data;
-
-                            // Enqueue a new send request
-                            try connection.prepSend(&ring, connection.http_handling.response_body);
-                        } else {
-                            // Switch to reading a new request.
-                            connection.http_handling.state = .reading_request;
-
-                            // Enqueue a new recv request
-                            try connection.prepRecv(&ring);
-                        }
-                    }
+                    try handleSend(&ring, completion, cqe.res, op);
                 },
             }
         }
