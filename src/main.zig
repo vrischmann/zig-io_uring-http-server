@@ -499,26 +499,28 @@ pub fn main() anyerror!void {
                     assert(connection.state == .connected);
 
                     // handle errors
-                    if (cqe.res == 0) {
-                        logger.info("RECV host={} fd={} end of file", .{
-                            connection.addr,
-                            op.socket,
-                        });
-                    } else if (cqe.res < 0) {
-                        switch (@intToEnum(os.E, -cqe.res)) {
-                            .PIPE => logger.info("RECV host={} fd={} broken pipe", .{
+                    if (cqe.res <= 0) {
+                        if (cqe.res == 0) {
+                            logger.info("RECV host={} fd={} end of file", .{
                                 connection.addr,
                                 op.socket,
-                            }),
-                            .CONNRESET => logger.info("RECV host={} fd={} reset by peer", .{
-                                connection.addr,
-                                op.socket,
-                            }),
-                            else => logger.warn("RECV host={} fd={} errno {d}", .{
-                                connection.addr,
-                                op.socket,
-                                cqe.res,
-                            }),
+                            });
+                        } else {
+                            switch (@intToEnum(os.E, -cqe.res)) {
+                                .PIPE => logger.info("RECV host={} fd={} broken pipe", .{
+                                    connection.addr,
+                                    op.socket,
+                                }),
+                                .CONNRESET => logger.info("RECV host={} fd={} reset by peer", .{
+                                    connection.addr,
+                                    op.socket,
+                                }),
+                                else => logger.warn("RECV host={} fd={} errno {d}", .{
+                                    connection.addr,
+                                    op.socket,
+                                    cqe.res,
+                                }),
+                            }
                         }
 
                         connection.state = .terminating;
@@ -696,26 +698,28 @@ pub fn main() anyerror!void {
                     assert(connection.state == .connected);
 
                     // handle errors
-                    if (cqe.res == 0) {
-                        logger.info("SEND host={} fd={} end of file", .{
-                            connection.addr,
-                            op.socket,
-                        });
-                    } else if (cqe.res < 0) {
-                        switch (@intToEnum(os.E, -cqe.res)) {
-                            .PIPE => logger.info("SEND host={} fd={} broken pipe", .{
+                    if (cqe.res <= 0) {
+                        if (cqe.res == 0) {
+                            logger.info("SEND host={} fd={} end of file", .{
                                 connection.addr,
                                 op.socket,
-                            }),
-                            .CONNRESET => logger.info("SEND host={} fd={} reset by peer", .{
-                                connection.addr,
-                                op.socket,
-                            }),
-                            else => logger.warn("SEND host={} fd={} errno {d}", .{
-                                connection.addr,
-                                op.socket,
-                                cqe.res,
-                            }),
+                            });
+                        } else {
+                            switch (@intToEnum(os.E, -cqe.res)) {
+                                .PIPE => logger.info("SEND host={} fd={} broken pipe", .{
+                                    connection.addr,
+                                    op.socket,
+                                }),
+                                .CONNRESET => logger.info("SEND host={} fd={} reset by peer", .{
+                                    connection.addr,
+                                    op.socket,
+                                }),
+                                else => logger.warn("SEND host={} fd={} errno {d}", .{
+                                    connection.addr,
+                                    op.socket,
+                                    cqe.res,
+                                }),
+                            }
                         }
 
                         connection.state = .terminating;
