@@ -108,12 +108,12 @@ fn parseRequest(previous_buffer_len: usize, buffer: []const u8) !?ParseRequestRe
 const Completion = struct {
     const Self = @This();
 
-    ring: *IO_Uring,
-    operation: Operation,
+    ring: *IO_Uring = undefined,
+    operation: Operation = undefined,
     parent: enum {
         global,
         connection,
-    } = .global,
+    } = undefined,
 
     fn prep(self: *Self) !void {
         switch (self.operation) {
@@ -160,6 +160,7 @@ const Completion = struct {
                     .addr = undefined,
                 },
             },
+            .parent = .global,
         };
         try self.prep();
     }
@@ -381,13 +382,11 @@ fn handleAccept(ring: *IO_Uring, res: i32, op: *Operation.Accept, connections: [
     try connection.prepRecv(ring);
 }
 
-const AcceptState = struct {
-    completion: Completion = undefined,
-};
-
 const logger = std.log.scoped(.main);
 
-var global_accept: AcceptState = undefined;
+var global_accept: struct {
+    completion: Completion = undefined,
+} = undefined;
 
 pub fn main() anyerror!void {
     var gpa = heap.GeneralPurposeAllocator(.{}){};
