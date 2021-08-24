@@ -166,11 +166,13 @@ const Completion = struct {
 };
 
 const Operation = union(enum) {
-    accept: struct {
+    const Accept = struct {
         socket: os.socket_t,
         addr: os.sockaddr,
         addr_len: os.socklen_t = @sizeOf(os.sockaddr),
-    },
+    };
+
+    accept: Accept,
     recv: struct {
         socket: os.socket_t,
         buffer: []u8,
@@ -330,11 +332,62 @@ fn createServer(port: u16) !os.socket_t {
     return sockfd;
 }
 
+const AcceptError = error{
+    // from IO_Uring.get_sqe
+    SubmissionQueueFull,
+
+    NoFreeConnection,
+};
+
+fn handleAccept(ring: *IO_Uring, res: i32, op: *Operation.Accept, connections: []Connection) AcceptError!void {
+    // Handle errors
+    if (res < 0) {
+        switch (@intToEnum(os.E, -res)) {
+            .PIPE => logger.warn("ACCEPT broken pipe", .{}),
+            .CONNRESET => logger.warn("ACCEPT connection reset by peer", .{}),
+            .MFILE => logger.warn("ACCEPT too many open files", .{}),
+            else => {
+                logger.err("ERROR {}\n", .{res});
+                os.exit(1);
+            },
+        }
+        return;
+    }
+
+    // Get a connection object and initialize all state.
+    //
+    // If no connection is free we don't do anything.
+    var connection = for (connections) |*conn| {
+        if (conn.state == .free) {
+            conn.state = .connected;
+            break conn;
+        }
+    } else {
+        return error.NoFreeConnection;
+    };
+
+    connection.statistics.connect_time = time.milliTimestamp();
+
+    connection.socket = @intCast(os.socket_t, res);
+    connection.addr.any = op.addr;
+    connection.resetBuffer();
+
+    logger.info("ACCEPT fd={} host={}", .{
+        connection.socket,
+        connection.addr,
+    });
+
+    // Enqueue a new recv request
+    try connection.prepRecv(ring);
+}
+
 const AcceptState = struct {
     completion: Completion = undefined,
 };
 
 const logger = std.log.scoped(.main);
+
+var global_accept: AcceptState = undefined;
 
 pub fn main() anyerror!void {
     var gpa = heap.GeneralPurposeAllocator(.{}){};
@@ -380,7 +433,6 @@ pub fn main() anyerror!void {
     defer ring.deinit();
 
     // Accept connections indefinitely
-    var global_accept: AcceptState = undefined;
     try global_accept.completion.prepAccept(&ring, server_fd);
 
     while (true) {
@@ -398,48 +450,13 @@ pub fn main() anyerror!void {
                 .accept => |*op| {
                     assert(completion.parent == .global);
 
-                    if (cqe.res < 0) {
-                        switch (@intToEnum(os.E, -cqe.res)) {
-                            .PIPE => logger.warn("ACCEPT broken pipe", .{}),
-                            .CONNRESET => logger.warn("ACCEPT connection reset by peer", .{}),
-                            .MFILE => logger.warn("ACCEPT too many open files", .{}),
-                            else => {
-                                logger.err("ERROR {}\n", .{cqe});
-                                os.exit(1);
-                            },
-                        }
-                    } else {
-                        // Get a connection object and initialize all state.
-                        //
-                        // If no connection is free we don't do anything.
-                        var connection = for (connections) |*conn| {
-                            if (conn.state == .free) {
-                                conn.state = .connected;
-                                break conn;
-                            }
-                        } else {
+                    handleAccept(&ring, cqe.res, op, connections) catch |err| switch (err) {
+                        error.NoFreeConnection => {
                             logger.warn("no free connection available", .{});
-
-                            try global_accept.completion.prepAccept(&ring, server_fd);
-                            continue;
-                        };
-
-                        connection.statistics.connect_time = time.milliTimestamp();
-
-                        connection.socket = @intCast(os.socket_t, cqe.res);
-                        connection.addr.any = op.addr;
-                        connection.resetBuffer();
-
-                        logger.info("ACCEPT fd={} host={}", .{
-                            connection.socket,
-                            connection.addr,
-                        });
-
-                        // Enqueue a new recv request
-                        try connection.prepRecv(&ring);
-                        // Enqueue a new accept request
-                        try global_accept.completion.prepAccept(&ring, server_fd);
-                    }
+                        },
+                        else => return err,
+                    };
+                    try global_accept.completion.prepAccept(&ring, server_fd);
                 },
                 .recv => |*op| {
                     assert(completion.parent == .connection);
