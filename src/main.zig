@@ -106,15 +106,17 @@ fn parseRequest(previous_buffer_len: usize, buffer: []const u8) !?ParseRequestRe
     };
 }
 
+const CompletionParent = enum {
+    global,
+    connection,
+};
+
 const Completion = struct {
     const Self = @This();
 
     ring: *IO_Uring = undefined,
     operation: Operation = undefined,
-    parent: enum {
-        global,
-        connection,
-    } = undefined,
+    parent: CompletionParent = undefined,
 
     fn prep(self: *Self) !void {
         switch (self.operation) {
@@ -187,14 +189,16 @@ const Operation = union(enum) {
         addr_len: os.socklen_t = @sizeOf(os.sockaddr),
     };
 
+    const Close = struct {
+        socket: os.socket_t,
+    };
+
     accept: Accept,
     recv: struct {
         socket: os.socket_t,
         buffer: []u8,
     },
-    close: struct {
-        socket: os.socket_t,
-    },
+    close: Close,
     send: struct {
         socket: os.socket_t,
         buffer: []const u8,
@@ -399,6 +403,43 @@ fn handleAccept(ring: *IO_Uring, res: i32, op: *Operation.Accept, connections: [
 
     // Enqueue a new recv request
     try connection.prepRecv(ring);
+}
+
+const CloseError = error{
+    // from IO_Uring.get_sqe
+    SubmissionQueueFull,
+};
+
+fn handleClose(completion: *Completion, op: *Operation.Close) CloseError!void {
+    switch (completion.parent) {
+        .connection => {
+            var connection = @fieldParentPtr(Connection, "close_completion", completion);
+            assert(connection.state == .terminating);
+
+            const elapsed = time.milliTimestamp() - connection.statistics.connect_time;
+
+            logger.info("CLOSE host={} fd={} totalrecv={s} totalsent={s} elapsed={s}", .{
+                connection.addr,
+                op.socket,
+                fmt.fmtIntSizeBin(@intCast(u64, connection.statistics.bytes_recv)),
+                fmt.fmtIntSizeBin(@intCast(u64, connection.statistics.bytes_sent)),
+                fmt.fmtDuration(@intCast(u64, elapsed * time.ns_per_ms)),
+            });
+
+            const buffer = connection.buffer;
+            connection.* = .{
+                .buffer = buffer,
+            };
+        },
+        .global => {
+            const state = @fieldParentPtr(GlobalCloseState, "completion", completion);
+
+            logger.info("CLOSE ORPHANED SOCKET host={} fd={}", .{
+                state.addr,
+                op.socket,
+            });
+        },
+    }
 }
 
 const logger = std.log.scoped(.main);
@@ -662,34 +703,8 @@ pub fn main() anyerror!void {
                         }
                     }
                 },
-                .close => |*op| switch (completion.parent) {
-                    .connection => {
-                        var connection = @fieldParentPtr(Connection, "close_completion", completion);
-                        assert(connection.state == .terminating);
-
-                        const elapsed = time.milliTimestamp() - connection.statistics.connect_time;
-
-                        logger.info("CLOSE host={} fd={} totalrecv={s} totalsent={s} elapsed={s}", .{
-                            connection.addr,
-                            op.socket,
-                            fmt.fmtIntSizeBin(@intCast(u64, connection.statistics.bytes_recv)),
-                            fmt.fmtIntSizeBin(@intCast(u64, connection.statistics.bytes_sent)),
-                            fmt.fmtDuration(@intCast(u64, elapsed * time.ns_per_ms)),
-                        });
-
-                        const buffer = connection.buffer;
-                        connection.* = .{
-                            .buffer = buffer,
-                        };
-                    },
-                    .global => {
-                        const state = @fieldParentPtr(GlobalCloseState, "completion", completion);
-
-                        logger.info("CLOSE NON REGISTERED SOCKET host={} fd={}", .{
-                            state.addr,
-                            op.socket,
-                        });
-                    },
+                .close => |*op| {
+                    try handleClose(completion, op);
                 },
                 .send => |*op| {
                     assert(completion.parent == .connection);
