@@ -399,10 +399,10 @@ pub fn main() anyerror!void {
                     assert(completion.parent == .global);
 
                     if (cqe.res < 0) {
-                        switch (-cqe.res) {
-                            os.EPIPE => logger.warn("ACCEPT broken pipe", .{}),
-                            os.ECONNRESET => logger.warn("ACCEPT connection reset by peer", .{}),
-                            os.EMFILE => logger.warn("ACCEPT too many open files", .{}),
+                        switch (@intToEnum(os.E, -cqe.res)) {
+                            .PIPE => logger.warn("ACCEPT broken pipe", .{}),
+                            .CONNRESET => logger.warn("ACCEPT connection reset by peer", .{}),
+                            .MFILE => logger.warn("ACCEPT too many open files", .{}),
                             else => {
                                 logger.err("ERROR {}\n", .{cqe});
                                 os.exit(1);
@@ -448,17 +448,18 @@ pub fn main() anyerror!void {
                     assert(connection.state == .connected);
 
                     // handle errors
-                    if (cqe.res <= 0) {
-                        switch (-cqe.res) {
-                            os.EPIPE => logger.info("RECV host={} fd={} broken pipe", .{
+                    if (cqe.res == 0) {
+                        logger.info("RECV host={} fd={} end of file", .{
+                            connection.addr,
+                            op.socket,
+                        });
+                    } else if (cqe.res < 0) {
+                        switch (@intToEnum(os.E, -cqe.res)) {
+                            .PIPE => logger.info("RECV host={} fd={} broken pipe", .{
                                 connection.addr,
                                 op.socket,
                             }),
-                            os.ECONNRESET => logger.info("RECV host={} fd={} reset by peer", .{
-                                connection.addr,
-                                op.socket,
-                            }),
-                            0 => logger.info("RECV host={} fd={} end of file", .{
+                            .CONNRESET => logger.info("RECV host={} fd={} reset by peer", .{
                                 connection.addr,
                                 op.socket,
                             }),
@@ -636,17 +637,18 @@ pub fn main() anyerror!void {
                     assert(connection.state == .connected);
 
                     // handle errors
-                    if (cqe.res <= 0) {
-                        switch (-cqe.res) {
-                            os.EPIPE => logger.info("SEND host={} fd={} broken pipe", .{
+                    if (cqe.res == 0) {
+                        logger.info("SEND host={} fd={} end of file", .{
+                            connection.addr,
+                            op.socket,
+                        });
+                    } else if (cqe.res < 0) {
+                        switch (@intToEnum(os.E, -cqe.res)) {
+                            .PIPE => logger.info("SEND host={} fd={} broken pipe", .{
                                 connection.addr,
                                 op.socket,
                             }),
-                            os.ECONNRESET => logger.info("SEND host={} fd={} reset by peer", .{
-                                connection.addr,
-                                op.socket,
-                            }),
-                            0 => logger.info("SEND host={} fd={} end of file", .{
+                            .CONNRESET => logger.info("SEND host={} fd={} reset by peer", .{
                                 connection.addr,
                                 op.socket,
                             }),
