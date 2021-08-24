@@ -15,6 +15,7 @@ const io_uring_cqe = std.os.linux.io_uring_cqe;
 
 const max_ring_entries = 512;
 const max_buffer_size = 4096;
+const max_connections = 2;
 
 const c = @cImport({
     @cInclude("picohttpparser.h");
@@ -108,12 +109,12 @@ fn parseRequest(previous_buffer_len: usize, buffer: []const u8) !?ParseRequestRe
 const Completion = struct {
     const Self = @This();
 
-    ring: *IO_Uring,
-    operation: Operation,
+    ring: *IO_Uring = undefined,
+    operation: Operation = undefined,
     parent: enum {
         global,
         connection,
-    } = .global,
+    } = undefined,
 
     fn prep(self: *Self) !void {
         switch (self.operation) {
@@ -160,17 +161,33 @@ const Completion = struct {
                     .addr = undefined,
                 },
             },
+            .parent = .global,
+        };
+        try self.prep();
+    }
+
+    fn prepClose(self: *Self, ring: *IO_Uring, socket: os.socket_t) !void {
+        self.* = .{
+            .ring = ring,
+            .operation = .{
+                .close = .{
+                    .socket = socket,
+                },
+            },
+            .parent = .global,
         };
         try self.prep();
     }
 };
 
 const Operation = union(enum) {
-    accept: struct {
+    const Accept = struct {
         socket: os.socket_t,
         addr: os.sockaddr,
         addr_len: os.socklen_t = @sizeOf(os.sockaddr),
-    },
+    };
+
+    accept: Accept,
     recv: struct {
         socket: os.socket_t,
         buffer: []u8,
@@ -330,11 +347,81 @@ fn createServer(port: u16) !os.socket_t {
     return sockfd;
 }
 
-const AcceptState = struct {
-    completion: Completion = undefined,
+const AcceptError = error{
+    // from IO_Uring.get_sqe
+    SubmissionQueueFull,
+
+    NoFreeConnection,
 };
 
+fn handleAccept(ring: *IO_Uring, res: i32, op: *Operation.Accept, connections: []Connection) AcceptError!void {
+    // Handle errors
+    if (res < 0) {
+        switch (@intToEnum(os.E, -res)) {
+            .PIPE => logger.warn("ACCEPT broken pipe", .{}),
+            .CONNRESET => logger.warn("ACCEPT connection reset by peer", .{}),
+            .MFILE => logger.warn("ACCEPT too many open files", .{}),
+            else => {
+                logger.err("ERROR {}\n", .{res});
+                os.exit(1);
+            },
+        }
+        return;
+    }
+
+    const socket = @intCast(os.socket_t, res);
+
+    // Get a connection object and initialize all state.
+    //
+    // If no connection is free we don't do anything.
+    var connection = for (connections) |*conn| {
+        if (conn.state == .free) {
+            conn.state = .connected;
+            break conn;
+        }
+    } else {
+        global_close.addr.any = op.addr;
+        try global_close.completion.prepClose(ring, socket);
+
+        return error.NoFreeConnection;
+    };
+
+    connection.statistics.connect_time = time.milliTimestamp();
+
+    connection.socket = socket;
+    connection.addr.any = op.addr;
+    connection.resetBuffer();
+
+    logger.info("ACCEPT fd={} host={}", .{
+        connection.socket,
+        connection.addr,
+    });
+
+    // Enqueue a new recv request
+    try connection.prepRecv(ring);
+}
+
 const logger = std.log.scoped(.main);
+
+// State for accepting new connections on a listener socket.
+var global_accept: struct {
+    completion: Completion = undefined,
+} = undefined;
+
+const GlobalCloseState = struct {
+    completion: Completion = undefined,
+
+    // Holds the remote endpoint address of the socket to be closed.
+    addr: net.Address = net.Address{
+        .any = .{
+            .family = os.AF_INET,
+            .data = [_]u8{0} ** 14,
+        },
+    },
+};
+
+// State for closing sockets not yet associated with a connection.
+var global_close: GlobalCloseState = undefined;
 
 pub fn main() anyerror!void {
     var gpa = heap.GeneralPurposeAllocator(.{}){};
@@ -344,7 +431,7 @@ pub fn main() anyerror!void {
 
     var allocator = &gpa.allocator;
 
-    var connections = try allocator.alloc(Connection, 8);
+    var connections = try allocator.alloc(Connection, max_connections);
     for (connections) |*connection| {
         connection.* = .{
             .buffer = std.ArrayList(u8).init(allocator),
@@ -380,7 +467,6 @@ pub fn main() anyerror!void {
     defer ring.deinit();
 
     // Accept connections indefinitely
-    var global_accept: AcceptState = undefined;
     try global_accept.completion.prepAccept(&ring, server_fd);
 
     while (true) {
@@ -398,48 +484,13 @@ pub fn main() anyerror!void {
                 .accept => |*op| {
                     assert(completion.parent == .global);
 
-                    if (cqe.res < 0) {
-                        switch (@intToEnum(os.E, -cqe.res)) {
-                            .PIPE => logger.warn("ACCEPT broken pipe", .{}),
-                            .CONNRESET => logger.warn("ACCEPT connection reset by peer", .{}),
-                            .MFILE => logger.warn("ACCEPT too many open files", .{}),
-                            else => {
-                                logger.err("ERROR {}\n", .{cqe});
-                                os.exit(1);
-                            },
-                        }
-                    } else {
-                        // Get a connection object and initialize all state.
-                        //
-                        // If no connection is free we don't do anything.
-                        var connection = for (connections) |*conn| {
-                            if (conn.state == .free) {
-                                conn.state = .connected;
-                                break conn;
-                            }
-                        } else {
+                    handleAccept(&ring, cqe.res, op, connections) catch |err| switch (err) {
+                        error.NoFreeConnection => {
                             logger.warn("no free connection available", .{});
-
-                            try global_accept.completion.prepAccept(&ring, server_fd);
-                            continue;
-                        };
-
-                        connection.statistics.connect_time = time.milliTimestamp();
-
-                        connection.socket = @intCast(os.socket_t, cqe.res);
-                        connection.addr.any = op.addr;
-                        connection.resetBuffer();
-
-                        logger.info("ACCEPT fd={} host={}", .{
-                            connection.socket,
-                            connection.addr,
-                        });
-
-                        // Enqueue a new recv request
-                        try connection.prepRecv(&ring);
-                        // Enqueue a new accept request
-                        try global_accept.completion.prepAccept(&ring, server_fd);
-                    }
+                        },
+                        else => return err,
+                    };
+                    try global_accept.completion.prepAccept(&ring, server_fd);
                 },
                 .recv => |*op| {
                     assert(completion.parent == .connection);
@@ -448,26 +499,28 @@ pub fn main() anyerror!void {
                     assert(connection.state == .connected);
 
                     // handle errors
-                    if (cqe.res == 0) {
-                        logger.info("RECV host={} fd={} end of file", .{
-                            connection.addr,
-                            op.socket,
-                        });
-                    } else if (cqe.res < 0) {
-                        switch (@intToEnum(os.E, -cqe.res)) {
-                            .PIPE => logger.info("RECV host={} fd={} broken pipe", .{
+                    if (cqe.res <= 0) {
+                        if (cqe.res == 0) {
+                            logger.info("RECV host={} fd={} end of file", .{
                                 connection.addr,
                                 op.socket,
-                            }),
-                            .CONNRESET => logger.info("RECV host={} fd={} reset by peer", .{
-                                connection.addr,
-                                op.socket,
-                            }),
-                            else => logger.warn("RECV host={} fd={} errno {d}", .{
-                                connection.addr,
-                                op.socket,
-                                cqe.res,
-                            }),
+                            });
+                        } else {
+                            switch (@intToEnum(os.E, -cqe.res)) {
+                                .PIPE => logger.info("RECV host={} fd={} broken pipe", .{
+                                    connection.addr,
+                                    op.socket,
+                                }),
+                                .CONNRESET => logger.info("RECV host={} fd={} reset by peer", .{
+                                    connection.addr,
+                                    op.socket,
+                                }),
+                                else => logger.warn("RECV host={} fd={} errno {d}", .{
+                                    connection.addr,
+                                    op.socket,
+                                    cqe.res,
+                                }),
+                            }
                         }
 
                         connection.state = .terminating;
@@ -609,26 +662,34 @@ pub fn main() anyerror!void {
                         }
                     }
                 },
-                .close => |*op| {
-                    assert(completion.parent == .connection);
+                .close => |*op| switch (completion.parent) {
+                    .connection => {
+                        var connection = @fieldParentPtr(Connection, "close_completion", completion);
+                        assert(connection.state == .terminating);
 
-                    var connection = @fieldParentPtr(Connection, "close_completion", completion);
-                    assert(connection.state == .terminating);
+                        const elapsed = time.milliTimestamp() - connection.statistics.connect_time;
 
-                    const elapsed = time.milliTimestamp() - connection.statistics.connect_time;
+                        logger.info("CLOSE host={} fd={} totalrecv={s} totalsent={s} elapsed={s}", .{
+                            connection.addr,
+                            op.socket,
+                            fmt.fmtIntSizeBin(@intCast(u64, connection.statistics.bytes_recv)),
+                            fmt.fmtIntSizeBin(@intCast(u64, connection.statistics.bytes_sent)),
+                            fmt.fmtDuration(@intCast(u64, elapsed * time.ns_per_ms)),
+                        });
 
-                    logger.info("CLOSE host={} fd={} totalrecv={s} totalsent={s} elapsed={s}", .{
-                        connection.addr,
-                        op.socket,
-                        fmt.fmtIntSizeBin(@intCast(u64, connection.statistics.bytes_recv)),
-                        fmt.fmtIntSizeBin(@intCast(u64, connection.statistics.bytes_sent)),
-                        fmt.fmtDuration(@intCast(u64, elapsed * time.ns_per_ms)),
-                    });
+                        const buffer = connection.buffer;
+                        connection.* = .{
+                            .buffer = buffer,
+                        };
+                    },
+                    .global => {
+                        const state = @fieldParentPtr(GlobalCloseState, "completion", completion);
 
-                    const buffer = connection.buffer;
-                    connection.* = .{
-                        .buffer = buffer,
-                    };
+                        logger.info("CLOSE NON REGISTERED SOCKET host={} fd={}", .{
+                            state.addr,
+                            op.socket,
+                        });
+                    },
                 },
                 .send => |*op| {
                     assert(completion.parent == .connection);
@@ -637,26 +698,28 @@ pub fn main() anyerror!void {
                     assert(connection.state == .connected);
 
                     // handle errors
-                    if (cqe.res == 0) {
-                        logger.info("SEND host={} fd={} end of file", .{
-                            connection.addr,
-                            op.socket,
-                        });
-                    } else if (cqe.res < 0) {
-                        switch (@intToEnum(os.E, -cqe.res)) {
-                            .PIPE => logger.info("SEND host={} fd={} broken pipe", .{
+                    if (cqe.res <= 0) {
+                        if (cqe.res == 0) {
+                            logger.info("SEND host={} fd={} end of file", .{
                                 connection.addr,
                                 op.socket,
-                            }),
-                            .CONNRESET => logger.info("SEND host={} fd={} reset by peer", .{
-                                connection.addr,
-                                op.socket,
-                            }),
-                            else => logger.warn("SEND host={} fd={} errno {d}", .{
-                                connection.addr,
-                                op.socket,
-                                cqe.res,
-                            }),
+                            });
+                        } else {
+                            switch (@intToEnum(os.E, -cqe.res)) {
+                                .PIPE => logger.info("SEND host={} fd={} broken pipe", .{
+                                    connection.addr,
+                                    op.socket,
+                                }),
+                                .CONNRESET => logger.info("SEND host={} fd={} reset by peer", .{
+                                    connection.addr,
+                                    op.socket,
+                                }),
+                                else => logger.warn("SEND host={} fd={} errno {d}", .{
+                                    connection.addr,
+                                    op.socket,
+                                    cqe.res,
+                                }),
+                            }
                         }
 
                         connection.state = .terminating;
