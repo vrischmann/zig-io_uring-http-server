@@ -165,6 +165,19 @@ const Completion = struct {
         };
         try self.prep();
     }
+
+    fn prepClose(self: *Self, ring: *IO_Uring, socket: os.socket_t) !void {
+        self.* = .{
+            .ring = ring,
+            .operation = .{
+                .close = .{
+                    .socket = socket,
+                },
+            },
+            .parent = .global,
+        };
+        try self.prep();
+    }
 };
 
 const Operation = union(enum) {
@@ -356,6 +369,8 @@ fn handleAccept(ring: *IO_Uring, res: i32, op: *Operation.Accept, connections: [
         return;
     }
 
+    const socket = @intCast(os.socket_t, res);
+
     // Get a connection object and initialize all state.
     //
     // If no connection is free we don't do anything.
@@ -365,12 +380,15 @@ fn handleAccept(ring: *IO_Uring, res: i32, op: *Operation.Accept, connections: [
             break conn;
         }
     } else {
+        global_close.addr.any = op.addr;
+        try global_close.completion.prepClose(ring, socket);
+
         return error.NoFreeConnection;
     };
 
     connection.statistics.connect_time = time.milliTimestamp();
 
-    connection.socket = @intCast(os.socket_t, res);
+    connection.socket = socket;
     connection.addr.any = op.addr;
     connection.resetBuffer();
 
@@ -385,9 +403,25 @@ fn handleAccept(ring: *IO_Uring, res: i32, op: *Operation.Accept, connections: [
 
 const logger = std.log.scoped(.main);
 
+// State for accepting new connections on a listener socket.
 var global_accept: struct {
     completion: Completion = undefined,
 } = undefined;
+
+const GlobalCloseState = struct {
+    completion: Completion = undefined,
+
+    // Holds the remote endpoint address of the socket to be closed.
+    addr: net.Address = net.Address{
+        .any = .{
+            .family = os.AF_INET,
+            .data = [_]u8{0} ** 14,
+        },
+    },
+};
+
+// State for closing sockets not yet associated with a connection.
+var global_close: GlobalCloseState = undefined;
 
 pub fn main() anyerror!void {
     var gpa = heap.GeneralPurposeAllocator(.{}){};
@@ -626,26 +660,34 @@ pub fn main() anyerror!void {
                         }
                     }
                 },
-                .close => |*op| {
-                    assert(completion.parent == .connection);
+                .close => |*op| switch (completion.parent) {
+                    .connection => {
+                        var connection = @fieldParentPtr(Connection, "close_completion", completion);
+                        assert(connection.state == .terminating);
 
-                    var connection = @fieldParentPtr(Connection, "close_completion", completion);
-                    assert(connection.state == .terminating);
+                        const elapsed = time.milliTimestamp() - connection.statistics.connect_time;
 
-                    const elapsed = time.milliTimestamp() - connection.statistics.connect_time;
+                        logger.info("CLOSE host={} fd={} totalrecv={s} totalsent={s} elapsed={s}", .{
+                            connection.addr,
+                            op.socket,
+                            fmt.fmtIntSizeBin(@intCast(u64, connection.statistics.bytes_recv)),
+                            fmt.fmtIntSizeBin(@intCast(u64, connection.statistics.bytes_sent)),
+                            fmt.fmtDuration(@intCast(u64, elapsed * time.ns_per_ms)),
+                        });
 
-                    logger.info("CLOSE host={} fd={} totalrecv={s} totalsent={s} elapsed={s}", .{
-                        connection.addr,
-                        op.socket,
-                        fmt.fmtIntSizeBin(@intCast(u64, connection.statistics.bytes_recv)),
-                        fmt.fmtIntSizeBin(@intCast(u64, connection.statistics.bytes_sent)),
-                        fmt.fmtDuration(@intCast(u64, elapsed * time.ns_per_ms)),
-                    });
+                        const buffer = connection.buffer;
+                        connection.* = .{
+                            .buffer = buffer,
+                        };
+                    },
+                    .global => {
+                        const state = @fieldParentPtr(GlobalCloseState, "completion", completion);
 
-                    const buffer = connection.buffer;
-                    connection.* = .{
-                        .buffer = buffer,
-                    };
+                        logger.info("CLOSE NON REGISTERED SOCKET host={} fd={}", .{
+                            state.addr,
+                            op.socket,
+                        });
+                    },
                 },
                 .send => |*op| {
                     assert(completion.parent == .connection);
