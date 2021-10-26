@@ -532,13 +532,15 @@ pub fn main() anyerror!void {
     var ctx = try ServerContext.init(allocator, &ring);
     defer ctx.deinit();
 
-    var accept_waiting: bool = false;
-    while (true) {
-        var remote_addr = net.Address{
-            .any = undefined,
-        };
-        var remote_addr_size: u32 = @sizeOf(os.sockaddr);
+    var remote_addr = net.Address{
+        .any = undefined,
+    };
+    var remote_addr_size: u32 = @sizeOf(os.sockaddr);
 
+    var accept_waiting: bool = false;
+    var iteration: usize = 0;
+
+    while (true) : (iteration += 1) {
         if (!accept_waiting and ctx.clients.items.len < max_connections) {
             const sqe = try ring.accept(
                 @ptrToInt(&remote_addr),
