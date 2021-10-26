@@ -247,15 +247,18 @@ pub fn dispatch(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) void {
         },
     };
 
-    res catch |err| switch (err) {
-        // TODO(vincent): interpret error
-        error.UnexpectedEOF => {
-            ctx.disconnectClient(client);
-        },
-        else => {
-            logger.err("read request failed, err: {}", .{err});
-            ctx.disconnectClient(client);
-        },
+    res catch |err| {
+        switch (err) {
+            // TODO(vincent): interpret error
+            error.UnexpectedEOF => {
+                logger.debug("read request failed, err: {}", .{err});
+            },
+            else => {
+                logger.err("read request failed, err: {}", .{err});
+            },
+        }
+
+        ctx.disconnectClient(client);
     };
 }
 
