@@ -392,13 +392,10 @@ fn handleWriteResponse(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) 
 fn processRequestWithBody(ctx: *ServerContext, client: *Client) !void {
     _ = ctx;
 
-    logger.debug("addr={s} body complete, size={d} bytes", .{
-        client.addr,
-        client.buffer.items.len,
-    });
-    logger.debug("addr={s} body data=\"{s}\"", .{
+    logger.debug("addr={s} body data=\"{s}\" size={s}", .{
         client.addr,
         fmt.fmtSliceEscapeLower(client.buffer.items),
+        fmt.fmtIntSizeBin(@intCast(u64, client.buffer.items.len)),
     });
 
     // TODO(vincent): actually do something
