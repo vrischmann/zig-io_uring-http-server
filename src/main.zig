@@ -170,11 +170,7 @@ const ServerContext = struct {
         const client_fd = @intCast(os.socket_t, cqe.res);
 
         var client = try self.clients.addOne();
-        client.* = .{
-            .addr = remote_addr.*,
-            .fd = client_fd,
-            .buffer = std.ArrayList(u8).init(self.root_allocator),
-        };
+        client.init(self.root_allocator, remote_addr.*, client_fd);
 
         try submitRead(self, client, client_fd, 0);
     }
@@ -206,10 +202,13 @@ const Client = struct {
     const State = enum {
         read_request,
         read_body,
-        open_file,
-        read_file,
+        open_response_file,
+        read_response_file,
+        write_file,
         write_response,
     };
+
+    arena: heap.ArenaAllocator,
 
     addr: net.Address,
     fd: os.socket_t,
@@ -225,8 +224,18 @@ const Client = struct {
         content_length: ?usize = null,
     } = .{},
 
+    pub fn init(self: *Self, allocator: *mem.Allocator, remote_addr: net.Address, client_fd: os.socket_t) void {
+        self.* = .{
+            .arena = heap.ArenaAllocator.init(allocator),
+            .addr = remote_addr,
+            .fd = client_fd,
+            .buffer = undefined,
+        };
+        self.buffer = std.ArrayList(u8).init(&self.arena.allocator);
+    }
+
     pub fn deinit(self: *Self) void {
-        self.buffer.deinit();
+        self.arena.deinit();
     }
 
     pub fn setBuffer(self: *Self, data: []const u8) void {
@@ -241,6 +250,7 @@ pub fn dispatch(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) void {
     var res = switch (client.state) {
         .read_request => handleReadRequest(ctx, client, cqe),
         .read_body => handleReadBody(ctx, client, cqe),
+        .open_response_file => handleOpenFile(ctx, client, cqe),
         .write_response => handleWriteResponse(ctx, client, cqe),
         else => {
             std.debug.panic("state {s} not handled", .{client.state});
@@ -346,6 +356,20 @@ fn handleReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
     }
 
     try processRequestWithBody(ctx, client);
+}
+
+fn handleOpenFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+    debug.assert(client.state == .open_response_file);
+
+    _ = ctx;
+
+    switch (cqe.err()) {
+        .SUCCESS => {},
+        else => |err| {
+            logger.err("addr={s} unexpected errno={d}", .{ client.addr, err });
+            return error.Unexpected;
+        },
+    }
 }
 
 fn handleWriteResponse(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
@@ -454,6 +478,27 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
         return;
     }
 
+    // If the request is for a static file, submit an open
+    if (mem.startsWith(u8, client.current.result.req.getPath(), "/static/")) {
+        client.state = .open_response_file;
+
+        const path = client.current.result.req.getPath()[1..];
+        if (mem.eql(u8, path, "static/")) {
+            return error.InvalidFilePath;
+        }
+
+        try submitOpenFile(
+            ctx,
+            client,
+            path,
+            os.linux.O.RDONLY | os.linux.O.NOFOLLOW,
+            0644,
+        );
+        return;
+    }
+
+    logger.debug("path: {s}", .{client.current.result.req.getPath()});
+
     // TODO(vincent): actually do something
 
     client.setBuffer(static_response);
@@ -492,6 +537,28 @@ fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u6
         fd,
         client.buffer.items,
         offset,
+    );
+    _ = sqe;
+}
+
+fn submitOpenFile(ctx: *ServerContext, client: *Client, path: []const u8, flags: u32, mode: os.mode_t) !void {
+    logger.debug("addr={s} submitting open, path=\"{s}\"", .{
+        client.addr,
+        fmt.fmtSliceEscapeLower(path),
+    });
+
+    // NOTE(vincent): with the GPA this calls mmap, slow as shit.
+    const null_terminated_path = try client.arena.allocator.dupeZ(u8, path);
+    defer client.arena.allocator.free(null_terminated_path);
+
+    std.debug.print("null terminated path: {s}\n", .{fmt.fmtSliceHexLower(mem.spanZ(null_terminated_path))});
+
+    var sqe = try ctx.ring.openat(
+        @ptrToInt(client),
+        os.linux.AT.FDCWD,
+        null_terminated_path,
+        flags,
+        mode,
     );
     _ = sqe;
 }
