@@ -479,8 +479,9 @@ fn submitRead(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u64
 }
 
 fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u64) !void {
-    logger.debug("addr={s} submitting write to {d}, offset {d}, data=\"{s}\"", .{
+    logger.debug("addr={s} submitting write of {s} to {d}, offset {d}, data=\"{s}\"", .{
         client.addr,
+        fmt.fmtIntSizeBin(client.buffer.items.len),
         fd,
         offset,
         fmt.fmtSliceEscapeLower(client.buffer.items),
