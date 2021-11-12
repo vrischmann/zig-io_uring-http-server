@@ -554,7 +554,9 @@ pub fn main() anyerror!void {
 
         const cqe = try ring.copy_cqe();
 
-        if (cqe.user_data == @ptrToInt(&remote_addr)) {
+        if (cqe.user_data == 0) {
+            logger.debug("cqe without user data, not doing anything", .{});
+        } else if (cqe.user_data == @ptrToInt(&remote_addr)) {
             try ctx.handleAccept(cqe, &remote_addr);
             accept_waiting = false;
         } else {
