@@ -208,6 +208,12 @@ const Client = struct {
         write_response,
     };
 
+    /// Buffer and allocator exclusively used when submitting an openat SQE.
+    ///
+    /// We work with []const u8 but openat expects a nul terminated string, so we have to dupe with a sentinel.
+    openfile_buffer: [128]u8 = undefined,
+    openfile_allocator: heap.FixedBufferAllocator = undefined,
+
     arena: heap.ArenaAllocator,
 
     addr: net.Address,
@@ -231,6 +237,7 @@ const Client = struct {
             .fd = client_fd,
             .buffer = undefined,
         };
+        self.openfile_allocator = heap.FixedBufferAllocator.init(&self.openfile_buffer);
         self.buffer = std.ArrayList(u8).init(&self.arena.allocator);
     }
 
@@ -547,16 +554,12 @@ fn submitOpenFile(ctx: *ServerContext, client: *Client, path: []const u8, flags:
         fmt.fmtSliceEscapeLower(path),
     });
 
-    // NOTE(vincent): with the GPA this calls mmap, slow as shit.
-    const null_terminated_path = try client.arena.allocator.dupeZ(u8, path);
-    defer client.arena.allocator.free(null_terminated_path);
-
-    std.debug.print("null terminated path: {s}\n", .{fmt.fmtSliceHexLower(mem.spanZ(null_terminated_path))});
+    const path_z = try client.openfile_allocator.allocator.dupeZ(u8, path);
 
     var sqe = try ctx.ring.openat(
         @ptrToInt(client),
         os.linux.AT.FDCWD,
-        null_terminated_path,
+        path_z,
         flags,
         mode,
     );
