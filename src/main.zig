@@ -142,18 +142,29 @@ const ServerContext = struct {
     root_allocator: *mem.Allocator,
     ring: *IO_Uring,
     clients: std.ArrayList(Client),
+    client_id_seq: Client.ID,
+    fds: [max_connections]os.fd_t,
 
     pub fn init(allocator: *mem.Allocator, ring: *IO_Uring) !Self {
         var res = Self{
             .root_allocator = allocator,
             .ring = ring,
             .clients = try std.ArrayList(Client).initCapacity(allocator, max_connections),
+            .client_id_seq = 0,
+            .fds = [_]os.fd_t{-1} ** max_connections,
         };
         return res;
     }
 
     pub fn deinit(self: *Self) void {
         self.clients.deinit();
+    }
+
+    pub fn registerFileDescriptors(self: *Self) !void {
+        try self.ring.register_files(self.fds[0..]);
+    }
+    pub fn updateFileDescriptors(self: *Self) !void {
+        try self.ring.register_files_update(0, self.fds[0..]);
     }
 
     pub fn handleAccept(self: *Self, cqe: os.linux.io_uring_cqe, remote_addr: *net.Address) !void {
@@ -170,7 +181,11 @@ const ServerContext = struct {
         const client_fd = @intCast(os.socket_t, cqe.res);
 
         var client = try self.clients.addOne();
-        client.init(self.root_allocator, remote_addr.*, client_fd);
+
+        const client_id = self.client_id_seq;
+        self.client_id_seq += 1;
+
+        client.init(self.root_allocator, client_id, remote_addr.*, client_fd);
 
         try submitRead(self, client, client_fd, 0);
     }
@@ -203,11 +218,14 @@ const Client = struct {
         read_request,
         read_body,
         open_response_file,
-        statx_response_file,
-        read_response_file,
+        setup_response_file,
         write_file,
         write_response,
     };
+
+    const ID = usize;
+
+    id: ID,
 
     /// Buffer and allocator exclusively used when submitting an openat SQE.
     ///
@@ -236,9 +254,10 @@ const Client = struct {
         } = .{},
     } = .{},
 
-    pub fn init(self: *Self, allocator: *mem.Allocator, remote_addr: net.Address, client_fd: os.socket_t) void {
+    pub fn init(self: *Self, allocator: *mem.Allocator, id: ID, remote_addr: net.Address, client_fd: os.socket_t) void {
         self.* = .{
             .arena = heap.ArenaAllocator.init(allocator),
+            .id = id,
             .addr = remote_addr,
             .fd = client_fd,
             .buffer = undefined,
@@ -262,7 +281,7 @@ pub fn dispatch(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) void {
         .read_request => handleReadRequest(ctx, client, cqe),
         .read_body => handleReadBody(ctx, client, cqe),
         .open_response_file => handleOpenFile(ctx, client, cqe),
-        .statx_response_file => handleStatxFile(ctx, client, cqe),
+        .setup_response_file => handleSetupResponseFile(ctx, client, cqe),
         .write_response => handleWriteResponse(ctx, client, cqe),
         else => {
             std.debug.panic("state {s} not handled", .{client.state});
@@ -396,9 +415,13 @@ fn handleOpenFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
 
     logger.debug("addr={s} HANDLE OPEN FILE fd={}", .{ client.addr, client.current.response_file.fd });
 
-    client.state = .statx_response_file;
+    // Add the file descriptor to the registered file descriptors.
+    ctx.fds[client.id] = client.current.response_file.fd;
+    try ctx.updateFileDescriptors();
 
-    try submitStatxFile(
+    client.state = .setup_response_file;
+
+    try submitSetupResponseFile(
         ctx,
         client,
         client.current.response_file.fd,
@@ -408,8 +431,8 @@ fn handleOpenFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
     );
 }
 
-fn handleStatxFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
-    debug.assert(client.state == .statx_response_file);
+fn handleSetupResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+    debug.assert(client.state == .setup_response_file);
 
     _ = ctx;
 
@@ -634,7 +657,7 @@ fn submitOpenFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flag
     _ = sqe;
 }
 
-fn submitStatxFile(ctx: *ServerContext, client: *Client, fd: os.fd_t, flags: u32, mask: u32, buf: *os.linux.Statx) !void {
+fn submitSetupResponseFile(ctx: *ServerContext, client: *Client, fd: os.fd_t, flags: u32, mask: u32, buf: *os.linux.Statx) !void {
     logger.debug("addr={s} submitting statx, fd={d}", .{
         client.addr,
         fd,
@@ -684,6 +707,7 @@ pub fn main() anyerror!void {
     // Initialize server context
     var ctx = try ServerContext.init(allocator, &ring);
     defer ctx.deinit();
+    try ctx.registerFileDescriptors();
 
     var remote_addr = net.Address{
         .any = undefined,
