@@ -663,8 +663,15 @@ fn submitStatxFile(ctx: *ServerContext, client: *Client, fd: os.fd_t, flags: u32
         fd,
     });
 
-    var sqe = try ctx.ring.statx(@ptrToInt(client), fd, "", flags, mask, buf);
-    sqe.flags |= os.linux.IOSQE_FIXED_FILE;
+    var sqe = try ctx.ring.statx(
+        @ptrToInt(client),
+        fd,
+        "",
+        flags,
+        mask,
+        buf,
+    );
+    _ = sqe;
 }
 
 pub fn main() anyerror!void {
