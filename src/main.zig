@@ -23,6 +23,10 @@ const c = @cImport({
     @cInclude("picohttpparser.h");
 });
 
+const StatusCode = enum(u16) {
+    OK = @as(u16, 200),
+};
+
 const Header = struct {
     name: []const u8,
     value: []const u8,
@@ -185,7 +189,7 @@ const ServerContext = struct {
         const client_id = self.client_id_seq;
         self.client_id_seq += 1;
 
-        client.init(self.root_allocator, client_id, remote_addr.*, client_fd);
+        try client.init(self.root_allocator, client_id, remote_addr.*, client_fd);
 
         try submitRead(self, client, client_fd, 0);
     }
@@ -217,29 +221,45 @@ const Client = struct {
     const State = enum {
         read_request,
         read_body,
+        write_response_buffer,
         open_response_file,
         statx_response_file,
         read_response_file,
         write_response_file,
-        write_response,
+    };
+
+    const Response = struct {
+        written: usize = 0,
+
+        status_code: StatusCode = .OK,
+
+        file: struct {
+            path: [:0]u8 = undefined,
+            fd: os.fd_t = -1,
+            statx_buf: os.linux.Statx = undefined,
+        } = .{},
+
+        pub fn reset(self: *Response) void {
+            const headers = self.headers;
+            self.* = .{
+                .headers = headers,
+            };
+        }
     };
 
     const ID = usize;
 
     id: ID,
 
-    /// Buffer and allocator exclusively used when submitting an openat SQE.
-    ///
-    /// We work with []const u8 but openat expects a nul terminated string, so we have to dupe with a sentinel.
-    openfile_buffer: [128]u8 = undefined,
-    openfile_allocator: heap.FixedBufferAllocator = undefined,
-
-    arena: heap.ArenaAllocator,
+    gpa: *mem.Allocator,
 
     addr: net.Address,
     fd: os.socket_t,
 
-    temp_buffer: [32]u8 = undefined,
+    // Buffer and allocator used for small allocations (nul-terminated path, integer to int conversions etc).
+    temp_buffer: [128]u8 = undefined,
+    temp_buffer_fba: heap.FixedBufferAllocator = undefined,
+
     buffer: std.ArrayList(u8),
 
     state: State = .read_request,
@@ -250,29 +270,23 @@ const Client = struct {
         content_length: ?usize = null,
     } = .{},
 
-    response: struct {
-        written: usize = 0,
-        file: struct {
-            path: [:0]u8 = undefined,
-            fd: os.fd_t = -1,
-            statx_buf: os.linux.Statx = undefined,
-        } = .{},
-    } = .{},
+    response: Response = .{},
 
-    pub fn init(self: *Self, allocator: *mem.Allocator, id: ID, remote_addr: net.Address, client_fd: os.socket_t) void {
+    pub fn init(self: *Self, allocator: *mem.Allocator, id: ID, remote_addr: net.Address, client_fd: os.socket_t) !void {
         self.* = .{
-            .arena = heap.ArenaAllocator.init(allocator),
+            .gpa = allocator,
             .id = id,
             .addr = remote_addr,
             .fd = client_fd,
             .buffer = undefined,
         };
-        self.openfile_allocator = heap.FixedBufferAllocator.init(&self.openfile_buffer);
-        self.buffer = std.ArrayList(u8).init(&self.arena.allocator);
+        self.temp_buffer_fba = heap.FixedBufferAllocator.init(&self.temp_buffer);
+
+        self.buffer = try std.ArrayList(u8).initCapacity(self.gpa, 128);
     }
 
     pub fn deinit(self: *Self) void {
-        self.arena.deinit();
+        self.buffer.deinit();
     }
 
     pub fn setBuffer(self: *Self, data: []const u8) void {
@@ -289,7 +303,7 @@ pub fn dispatch(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) void {
         .statx_response_file => handleStatxResponseFile(ctx, client, cqe),
         .read_response_file => handleReadResponseFile(ctx, client, cqe),
         .write_response_file => handleWriteResponseFile(ctx, client, cqe),
-        .write_response => handleWriteResponse(ctx, client, cqe),
+        .write_response_buffer => handleWriteResponseBuffer(ctx, client, cqe),
     };
 
     res catch |err| {
@@ -395,6 +409,7 @@ fn handleReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
 
 fn handleOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
     debug.assert(client.state == .open_response_file);
+    debug.assert(client.buffer.items.len == 0);
 
     _ = ctx;
 
@@ -437,6 +452,7 @@ fn handleOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cq
 
 fn handleStatxResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
     debug.assert(client.state == .statx_response_file);
+    debug.assert(client.buffer.items.len == 0);
 
     _ = ctx;
 
@@ -455,13 +471,31 @@ fn handleStatxResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
         fmt.fmtIntSizeBin(client.response.file.statx_buf.size),
     });
 
+    // Prepare the preambule + headers
+
+    client.response.status_code = .OK;
+
+    var w = client.buffer.writer();
+
+    try w.print("HTTP/1.1 {d} {s}\n", .{
+        @enumToInt(client.response.status_code),
+        @tagName(client.response.status_code),
+    });
+    try w.print("Content-Length: {d}\n", .{
+        client.response.file.statx_buf.size,
+    });
+    try w.print("\n", .{});
+
+    //
+
     client.state = .read_response_file;
 
-    try submitRead(ctx, client, client.response.file.fd, client.response.written);
+    try submitRead(ctx, client, client.response.file.fd, 0);
 }
 
 fn handleReadResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
     debug.assert(client.state == .read_response_file);
+    debug.assert(client.buffer.items.len > 0);
 
     switch (cqe.err()) {
         .SUCCESS => {},
@@ -482,7 +516,6 @@ fn handleReadResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cq
         client.response.file.fd,
     });
 
-    client.buffer.clearRetainingCapacity();
     try client.buffer.appendSlice(client.temp_buffer[0..read]);
 
     client.state = .write_response_file;
@@ -492,6 +525,7 @@ fn handleReadResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cq
 
 fn handleWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
     debug.assert(client.state == .write_response_file);
+    debug.assert(client.buffer.items.len > 0);
 
     switch (cqe.err()) {
         .SUCCESS => {},
@@ -530,7 +564,7 @@ fn handleWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
         client.buffer.clearRetainingCapacity();
         client.state = .read_response_file;
 
-        try submitRead(ctx, client, client.response.file.fd, client.response.written);
+        try submitRead(ctx, client, client.response.file.fd, 0);
         return;
     }
 
@@ -547,8 +581,8 @@ fn handleWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
     try submitRead(ctx, client, client.fd, 0);
 }
 
-fn handleWriteResponse(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
-    debug.assert(client.state == .write_response);
+fn handleWriteResponseBuffer(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+    debug.assert(client.state == .write_response_buffer);
 
     switch (cqe.err()) {
         .SUCCESS => {},
@@ -598,7 +632,7 @@ fn submitWriteNotFound(ctx: *ServerContext, client: *Client) !void {
     const static_response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
 
     client.setBuffer(static_response);
-    client.state = .write_response;
+    client.state = .write_response_buffer;
 
     try submitWrite(ctx, client, client.fd, 0);
 }
@@ -617,7 +651,7 @@ fn processRequestWithBody(ctx: *ServerContext, client: *Client) !void {
     const static_response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
 
     client.setBuffer(static_response);
-    client.state = .write_response;
+    client.state = .write_response_buffer;
 
     try submitWrite(ctx, client, client.fd, 0);
 }
@@ -677,7 +711,7 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
             return error.InvalidFilePath;
         }
 
-        client.response.file.path = try client.openfile_allocator.allocator.dupeZ(u8, path);
+        client.response.file.path = try client.temp_buffer_fba.allocator.dupeZ(u8, path);
 
         client.buffer.clearRetainingCapacity();
         client.state = .open_response_file;
@@ -699,7 +733,7 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
     const static_response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
 
     client.setBuffer(static_response);
-    client.state = .write_response;
+    client.state = .write_response_buffer;
 
     try submitWrite(ctx, client, client.fd, 0);
 }
