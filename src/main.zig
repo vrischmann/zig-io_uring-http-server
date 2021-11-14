@@ -203,6 +203,7 @@ const Client = struct {
         read_request,
         read_body,
         open_response_file,
+        statx_response_file,
         read_response_file,
         write_file,
         write_response,
@@ -228,6 +229,11 @@ const Client = struct {
         result: ParseRequestResult = undefined,
         body: []const u8 = "",
         content_length: ?usize = null,
+        response_file: struct {
+            path: [:0]u8 = undefined,
+            fd: os.fd_t = -1,
+            statx_buf: os.linux.Statx = undefined,
+        } = .{},
     } = .{},
 
     pub fn init(self: *Self, allocator: *mem.Allocator, remote_addr: net.Address, client_fd: os.socket_t) void {
@@ -251,13 +257,12 @@ const Client = struct {
     }
 };
 
-const static_response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
-
 pub fn dispatch(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) void {
     var res = switch (client.state) {
         .read_request => handleReadRequest(ctx, client, cqe),
         .read_body => handleReadBody(ctx, client, cqe),
         .open_response_file => handleOpenFile(ctx, client, cqe),
+        .statx_response_file => handleStatxFile(ctx, client, cqe),
         .write_response => handleWriteResponse(ctx, client, cqe),
         else => {
             std.debug.panic("state {s} not handled", .{client.state});
@@ -372,6 +377,35 @@ fn handleOpenFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
 
     switch (cqe.err()) {
         .SUCCESS => {},
+        .NOENT => {
+            logger.err("addr={s} no such file or directory, path=\"{s}\"", .{
+                client.addr,
+                fmt.fmtSliceEscapeLower(client.current.response_file.path),
+            });
+
+            try submitWriteNotFound(ctx, client);
+            return;
+        },
+        else => |err| {
+            logger.err("addr={s} unexpected errno={d}", .{ client.addr, err });
+            return error.Unexpected;
+        },
+    }
+
+    client.current.response_file.fd = @intCast(os.fd_t, cqe.res);
+
+    logger.debug("addr={s} HANDLE OPEN FILE fd={}", .{ client.addr, client.current.response_file.fd });
+
+    logger.debug("addr={s} submitting statx ", .{client.addr});
+}
+
+fn handleStatxFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+    debug.assert(client.state == .statx_response_file);
+
+    _ = ctx;
+
+    switch (cqe.err()) {
+        .SUCCESS => {},
         else => |err| {
             logger.err("addr={s} unexpected errno={d}", .{ client.addr, err });
             return error.Unexpected;
@@ -420,6 +454,21 @@ fn handleWriteResponse(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) 
     try submitRead(ctx, client, client.fd, 0);
 }
 
+fn submitWriteNotFound(ctx: *ServerContext, client: *Client) !void {
+    _ = ctx;
+
+    logger.debug("addr={s} returning 404 Not Found", .{
+        client.addr,
+    });
+
+    const static_response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+
+    client.setBuffer(static_response);
+    client.state = .write_response;
+
+    try submitWrite(ctx, client, client.fd, 0);
+}
+
 fn processRequestWithBody(ctx: *ServerContext, client: *Client) !void {
     _ = ctx;
 
@@ -430,6 +479,8 @@ fn processRequestWithBody(ctx: *ServerContext, client: *Client) !void {
     });
 
     // TODO(vincent): actually do something
+
+    const static_response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
 
     client.setBuffer(static_response);
     client.state = .write_response;
@@ -508,6 +559,8 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
 
     // TODO(vincent): actually do something
 
+    const static_response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+
     client.setBuffer(static_response);
     client.state = .write_response;
 
@@ -554,14 +607,33 @@ fn submitOpenFile(ctx: *ServerContext, client: *Client, path: []const u8, flags:
         fmt.fmtSliceEscapeLower(path),
     });
 
-    const path_z = try client.openfile_allocator.allocator.dupeZ(u8, path);
+    client.current.response_file.path = try client.openfile_allocator.allocator.dupeZ(u8, path);
 
     var sqe = try ctx.ring.openat(
         @ptrToInt(client),
         os.linux.AT.FDCWD,
-        path_z,
+        client.current.response_file.path,
         flags,
         mode,
+    );
+    _ = sqe;
+}
+
+fn submitStatxFile(ctx: *ServerContext, client: *Client, path: []const u8, flags: u32, mask: u32) !void {
+    logger.debug("addr={s} submitting open, path=\"{s}\"", .{
+        client.addr,
+        fmt.fmtSliceEscapeLower(path),
+    });
+
+    const path_z = try client.openfile_allocator.allocator.dupeZ(u8, path);
+
+    var sqe = try ctx.ring.statx(
+        @ptrToInt(client),
+        os.linux.AT.FDCWD,
+        path_z,
+        flags,
+        mask,
+        &client.current.response_file.statx_buf,
     );
     _ = sqe;
 }
