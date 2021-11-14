@@ -219,7 +219,8 @@ const Client = struct {
         read_body,
         open_response_file,
         statx_response_file,
-        write_file,
+        read_response_file,
+        write_response_file,
         write_response,
     };
 
@@ -243,11 +244,15 @@ const Client = struct {
 
     state: State = .read_request,
 
-    current: struct {
+    request: struct {
         result: ParseRequestResult = undefined,
         body: []const u8 = "",
         content_length: ?usize = null,
-        response_file: struct {
+    } = .{},
+
+    response: struct {
+        written: usize = 0,
+        file: struct {
             path: [:0]u8 = undefined,
             fd: os.fd_t = -1,
             statx_buf: os.linux.Statx = undefined,
@@ -280,12 +285,11 @@ pub fn dispatch(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) void {
     var res = switch (client.state) {
         .read_request => handleReadRequest(ctx, client, cqe),
         .read_body => handleReadBody(ctx, client, cqe),
-        .open_response_file => handleOpenFile(ctx, client, cqe),
-        .statx_response_file => handleStatxFile(ctx, client, cqe),
+        .open_response_file => handleOpenResponseFile(ctx, client, cqe),
+        .statx_response_file => handleStatxResponseFile(ctx, client, cqe),
+        .read_response_file => handleReadResponseFile(ctx, client, cqe),
+        .write_response_file => handleWriteResponseFile(ctx, client, cqe),
         .write_response => handleWriteResponse(ctx, client, cqe),
-        else => {
-            std.debug.panic("state {s} not handled", .{client.state});
-        },
     };
 
     res catch |err| {
@@ -333,7 +337,7 @@ fn handleReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !v
     try client.buffer.appendSlice(client.temp_buffer[0..read]);
 
     if (try parseRequest(previous_len, client.buffer.items)) |result| {
-        client.current.result = result;
+        client.request.result = result;
         try processRequest(ctx, client);
     } else {
         // Not enough data, read more.
@@ -372,7 +376,7 @@ fn handleReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
 
     try client.buffer.appendSlice(client.temp_buffer[0..read]);
 
-    const content_length = client.current.content_length.?;
+    const content_length = client.request.content_length.?;
 
     if (client.buffer.items.len < content_length) {
         logger.debug("addr={s} buffer len={d} bytes, content length={d} bytes", .{
@@ -389,7 +393,7 @@ fn handleReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
     try processRequestWithBody(ctx, client);
 }
 
-fn handleOpenFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+fn handleOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
     debug.assert(client.state == .open_response_file);
 
     _ = ctx;
@@ -399,7 +403,7 @@ fn handleOpenFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
         .NOENT => {
             logger.err("addr={s} no such file or directory, path=\"{s}\"", .{
                 client.addr,
-                fmt.fmtSliceEscapeLower(client.current.response_file.path),
+                fmt.fmtSliceEscapeLower(client.response.file.path),
             });
 
             try submitWriteNotFound(ctx, client);
@@ -411,12 +415,12 @@ fn handleOpenFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
         },
     }
 
-    client.current.response_file.fd = @intCast(os.fd_t, cqe.res);
+    client.response.file.fd = @intCast(os.fd_t, cqe.res);
 
-    logger.debug("addr={s} HANDLE OPEN FILE fd={}", .{ client.addr, client.current.response_file.fd });
+    logger.debug("addr={s} HANDLE OPEN FILE fd={}", .{ client.addr, client.response.file.fd });
 
     // Add the file descriptor to the registered file descriptors.
-    ctx.fds[client.id] = client.current.response_file.fd;
+    ctx.fds[client.id] = client.response.file.fd;
     try ctx.updateFileDescriptors();
 
     client.state = .statx_response_file;
@@ -424,14 +428,14 @@ fn handleOpenFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
     try submitStatxFile(
         ctx,
         client,
-        client.current.response_file.fd,
+        client.response.file.fd,
         os.linux.AT.EMPTY_PATH,
         os.linux.STATX_SIZE,
-        &client.current.response_file.statx_buf,
+        &client.response.file.statx_buf,
     );
 }
 
-fn handleStatxFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+fn handleStatxResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
     debug.assert(client.state == .statx_response_file);
 
     _ = ctx;
@@ -446,10 +450,101 @@ fn handleStatxFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !voi
 
     logger.debug("addr={s} HANDLE STATX FILE path=\"{s}\" fd={}, size={s}", .{
         client.addr,
-        client.current.response_file.path,
-        client.current.response_file.fd,
-        fmt.fmtIntSizeBin(client.current.response_file.statx_buf.size),
+        client.response.file.path,
+        client.response.file.fd,
+        fmt.fmtIntSizeBin(client.response.file.statx_buf.size),
     });
+
+    client.state = .read_response_file;
+
+    try submitRead(ctx, client, client.response.file.fd, client.response.written);
+}
+
+fn handleReadResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+    debug.assert(client.state == .read_response_file);
+
+    switch (cqe.err()) {
+        .SUCCESS => {},
+        else => |err| {
+            logger.err("addr={s} HANDLE READ RESPONSE FILE unexpected errno={d}", .{ client.addr, err });
+            return error.Unexpected;
+        },
+    }
+    if (cqe.res <= 0) {
+        return error.UnexpectedEOF;
+    }
+
+    const read = @intCast(usize, cqe.res);
+
+    logger.debug("addr={s} HANDLE READ RESPONSE FILE read of {d} bytes from {d} succeeded", .{
+        client.addr,
+        read,
+        client.response.file.fd,
+    });
+
+    client.buffer.clearRetainingCapacity();
+    try client.buffer.appendSlice(client.temp_buffer[0..read]);
+
+    client.state = .write_response_file;
+
+    try submitWrite(ctx, client, client.fd, 0);
+}
+
+fn handleWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+    debug.assert(client.state == .write_response_file);
+
+    switch (cqe.err()) {
+        .SUCCESS => {},
+        else => |err| {
+            logger.err("addr={s} HANDLE WRITE RESPONSE FILE unexpected errno={d}", .{ client.addr, err });
+            return error.Unexpected;
+        },
+    }
+    if (cqe.res <= 0) {
+        return error.UnexpectedEOF;
+    }
+
+    const written = @intCast(usize, cqe.res);
+
+    logger.debug("addr={s} HANDLE WRITE RESPONSE FILE write of {d} bytes to {d} succeeded", .{
+        client.addr,
+        written,
+        client.fd,
+    });
+
+    client.response.written += written;
+
+    if (written < client.buffer.items.len) {
+        // Short write, write the remaining data
+
+        // Remove the already written data
+        try client.buffer.replaceRange(0, written, &[0]u8{});
+
+        try submitWrite(ctx, client, client.fd, 0);
+        return;
+    }
+
+    if (client.response.written < client.response.file.statx_buf.size) {
+        // More data to read from the file, submit another read
+
+        client.buffer.clearRetainingCapacity();
+        client.state = .read_response_file;
+
+        try submitRead(ctx, client, client.response.file.fd, client.response.written);
+        return;
+    }
+
+    logger.debug("addr={s} HANDLE WRITE RESPONSE FILE done", .{
+        client.addr,
+    });
+
+    // Response file written, read the next request
+    client.request = .{};
+    client.response = .{};
+    client.buffer.clearRetainingCapacity();
+    client.state = .read_request;
+
+    try submitRead(ctx, client, client.fd, 0);
 }
 
 fn handleWriteResponse(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
@@ -486,7 +581,7 @@ fn handleWriteResponse(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) 
     logger.debug("HANDLE WRITE RESPONSE done", .{});
 
     // Response written, read the next request
-    client.current = .{};
+    client.request = .{};
     client.buffer.clearRetainingCapacity();
     client.state = .read_request;
 
@@ -528,7 +623,7 @@ fn processRequestWithBody(ctx: *ServerContext, client: *Client) !void {
 }
 
 fn processRequest(ctx: *ServerContext, client: *Client) !void {
-    const req = client.current.result.req;
+    const req = client.request.result.req;
 
     logger.debug("addr={s} parsed HTTP request", .{client.addr});
 
@@ -554,7 +649,7 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
 
     // If there's a content length we switch to reading the body.
     if (content_length) |n| {
-        try client.buffer.replaceRange(0, client.current.result.consumed, &[0]u8{});
+        try client.buffer.replaceRange(0, client.request.result.consumed, &[0]u8{});
 
         if (n > client.buffer.items.len) {
             logger.debug("addr={s} body incomplete, usable={d} bytes, body data=\"{s}\", content length: {d} bytes", .{
@@ -565,7 +660,7 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
             });
 
             client.state = .read_body;
-            client.current.content_length = n;
+            client.request.content_length = n;
 
             try submitRead(ctx, client, client.fd, 0);
             return;
@@ -576,26 +671,28 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
     }
 
     // If the request is for a static file, submit an open
-    if (mem.startsWith(u8, client.current.result.req.getPath(), "/static/")) {
-        client.state = .open_response_file;
-
-        const path = client.current.result.req.getPath()[1..];
+    if (mem.startsWith(u8, client.request.result.req.getPath(), "/static/")) {
+        const path = client.request.result.req.getPath()[1..];
         if (mem.eql(u8, path, "static/")) {
             return error.InvalidFilePath;
         }
 
-        client.current.response_file.path = try client.openfile_allocator.allocator.dupeZ(u8, path);
+        client.response.file.path = try client.openfile_allocator.allocator.dupeZ(u8, path);
+
+        client.buffer.clearRetainingCapacity();
+        client.state = .open_response_file;
+
         try submitOpenFile(
             ctx,
             client,
-            client.current.response_file.path,
+            client.response.file.path,
             os.linux.O.RDONLY | os.linux.O.NOFOLLOW,
             0644,
         );
         return;
     }
 
-    logger.debug("path: {s}", .{client.current.result.req.getPath()});
+    logger.debug("path: {s}", .{client.request.result.req.getPath()});
 
     // TODO(vincent): actually do something
 
@@ -623,7 +720,7 @@ fn submitRead(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u64
     _ = sqe;
 }
 
-fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u64) !void {
+fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.fd_t, offset: u64) !void {
     logger.debug("addr={s} submitting write of {s} to {d}, offset {d}, data=\"{s}\"", .{
         client.addr,
         fmt.fmtIntSizeBin(client.buffer.items.len),
@@ -650,7 +747,7 @@ fn submitOpenFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flag
     var sqe = try ctx.ring.openat(
         @ptrToInt(client),
         os.linux.AT.FDCWD,
-        client.current.response_file.path,
+        client.response.file.path,
         flags,
         mode,
     );
