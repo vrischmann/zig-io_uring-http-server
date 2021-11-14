@@ -1,0 +1,10 @@
+{
+    auto_https off
+}
+
+http://localhost:2015 {
+    file_server {
+        root static
+        browse
+    }
+}
