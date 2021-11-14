@@ -396,7 +396,16 @@ fn handleOpenFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
 
     logger.debug("addr={s} HANDLE OPEN FILE fd={}", .{ client.addr, client.current.response_file.fd });
 
-    logger.debug("addr={s} submitting statx ", .{client.addr});
+    client.state = .statx_response_file;
+
+    try submitStatxFile(
+        ctx,
+        client,
+        client.current.response_file.fd,
+        os.linux.AT.EMPTY_PATH,
+        os.linux.STATX_SIZE,
+        &client.current.response_file.statx_buf,
+    );
 }
 
 fn handleStatxFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
@@ -411,6 +420,13 @@ fn handleStatxFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !voi
             return error.Unexpected;
         },
     }
+
+    logger.debug("addr={s} HANDLE STATX FILE path=\"{s}\" fd={}, size={s}", .{
+        client.addr,
+        client.current.response_file.path,
+        client.current.response_file.fd,
+        fmt.fmtIntSizeBin(client.current.response_file.statx_buf.size),
+    });
 }
 
 fn handleWriteResponse(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
@@ -545,10 +561,11 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
             return error.InvalidFilePath;
         }
 
+        client.current.response_file.path = try client.openfile_allocator.allocator.dupeZ(u8, path);
         try submitOpenFile(
             ctx,
             client,
-            path,
+            client.current.response_file.path,
             os.linux.O.RDONLY | os.linux.O.NOFOLLOW,
             0644,
         );
@@ -601,13 +618,11 @@ fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u6
     _ = sqe;
 }
 
-fn submitOpenFile(ctx: *ServerContext, client: *Client, path: []const u8, flags: u32, mode: os.mode_t) !void {
+fn submitOpenFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flags: u32, mode: os.mode_t) !void {
     logger.debug("addr={s} submitting open, path=\"{s}\"", .{
         client.addr,
         fmt.fmtSliceEscapeLower(path),
     });
-
-    client.current.response_file.path = try client.openfile_allocator.allocator.dupeZ(u8, path);
 
     var sqe = try ctx.ring.openat(
         @ptrToInt(client),
@@ -619,21 +634,19 @@ fn submitOpenFile(ctx: *ServerContext, client: *Client, path: []const u8, flags:
     _ = sqe;
 }
 
-fn submitStatxFile(ctx: *ServerContext, client: *Client, path: []const u8, flags: u32, mask: u32) !void {
-    logger.debug("addr={s} submitting open, path=\"{s}\"", .{
+fn submitStatxFile(ctx: *ServerContext, client: *Client, fd: os.fd_t, flags: u32, mask: u32, buf: *os.linux.Statx) !void {
+    logger.debug("addr={s} submitting statx, fd={d}", .{
         client.addr,
-        fmt.fmtSliceEscapeLower(path),
+        fd,
     });
-
-    const path_z = try client.openfile_allocator.allocator.dupeZ(u8, path);
 
     var sqe = try ctx.ring.statx(
         @ptrToInt(client),
-        os.linux.AT.FDCWD,
-        path_z,
+        fd,
+        "",
         flags,
         mask,
-        &client.current.response_file.statx_buf,
+        buf,
     );
     _ = sqe;
 }
@@ -713,6 +726,6 @@ pub fn main() anyerror!void {
             }
         }
 
-        // std.time.sleep(300 * std.time.ns_per_ms);
+        std.time.sleep(300 * std.time.ns_per_ms);
     }
 }
