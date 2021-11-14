@@ -218,7 +218,7 @@ const Client = struct {
         read_request,
         read_body,
         open_response_file,
-        setup_response_file,
+        statx_response_file,
         write_file,
         write_response,
     };
@@ -281,7 +281,7 @@ pub fn dispatch(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) void {
         .read_request => handleReadRequest(ctx, client, cqe),
         .read_body => handleReadBody(ctx, client, cqe),
         .open_response_file => handleOpenFile(ctx, client, cqe),
-        .setup_response_file => handleSetupResponseFile(ctx, client, cqe),
+        .statx_response_file => handleStatxFile(ctx, client, cqe),
         .write_response => handleWriteResponse(ctx, client, cqe),
         else => {
             std.debug.panic("state {s} not handled", .{client.state});
@@ -419,9 +419,9 @@ fn handleOpenFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
     ctx.fds[client.id] = client.current.response_file.fd;
     try ctx.updateFileDescriptors();
 
-    client.state = .setup_response_file;
+    client.state = .statx_response_file;
 
-    try submitSetupResponseFile(
+    try submitStatxFile(
         ctx,
         client,
         client.current.response_file.fd,
@@ -431,8 +431,8 @@ fn handleOpenFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
     );
 }
 
-fn handleSetupResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
-    debug.assert(client.state == .setup_response_file);
+fn handleStatxFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+    debug.assert(client.state == .statx_response_file);
 
     _ = ctx;
 
@@ -657,21 +657,14 @@ fn submitOpenFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flag
     _ = sqe;
 }
 
-fn submitSetupResponseFile(ctx: *ServerContext, client: *Client, fd: os.fd_t, flags: u32, mask: u32, buf: *os.linux.Statx) !void {
+fn submitStatxFile(ctx: *ServerContext, client: *Client, fd: os.fd_t, flags: u32, mask: u32, buf: *os.linux.Statx) !void {
     logger.debug("addr={s} submitting statx, fd={d}", .{
         client.addr,
         fd,
     });
 
-    var sqe = try ctx.ring.statx(
-        @ptrToInt(client),
-        fd,
-        "",
-        flags,
-        mask,
-        buf,
-    );
-    _ = sqe;
+    var sqe = try ctx.ring.statx(@ptrToInt(client), fd, "", flags, mask, buf);
+    sqe.flags |= os.linux.IOSQE_FIXED_FILE;
 }
 
 pub fn main() anyerror!void {
