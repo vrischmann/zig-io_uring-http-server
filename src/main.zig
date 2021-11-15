@@ -12,6 +12,7 @@ const assert = std.debug.assert;
 
 const IO_Uring = std.os.linux.IO_Uring;
 const io_uring_cqe = std.os.linux.io_uring_cqe;
+const io_uring_sqe = std.os.linux.io_uring_sqe;
 
 const max_ring_entries = 512;
 const max_buffer_size = 4096;
@@ -140,35 +141,84 @@ fn createServer(port: u16) !os.socket_t {
     return sockfd;
 }
 
+/// Manages a set of registered file descriptors.
+/// The set size is fixed at compile time.
+///
+/// A client must acquire a file descriptor to use it, and release it when it disconnects.
+const RegisteredFileDescriptors = struct {
+    const Self = @This();
+
+    const State = enum {
+        used,
+        free,
+    };
+
+    fds: [max_connections]os.fd_t = [_]os.fd_t{-1} ** max_connections,
+    states: [max_connections]State = [_]State{.free} ** max_connections,
+
+    pub fn register(self: *Self, ring: *IO_Uring) !void {
+        logger.debug("REGISTERED FILE DESCRIPTORS, fds={d}", .{
+            self.fds,
+        });
+
+        try ring.register_files(self.fds[0..]);
+    }
+
+    pub fn update(self: *Self, ring: *IO_Uring) !void {
+        logger.debug("UPDATE FILE DESCRIPTORS, fds={d}", .{
+            self.fds,
+        });
+
+        try ring.register_files_update(0, self.fds[0..]);
+    }
+
+    pub fn acquire(self: *Self, fd: os.fd_t) ?i32 {
+        // Find a free slot in the states array
+        for (self.states) |*state, i| {
+            if (state.* == .free) {
+                // Slot is free, change its state and set the file descriptor.
+
+                state.* = .used;
+                self.fds[i] = fd;
+
+                return @intCast(i32, i);
+            }
+        } else {
+            return null;
+        }
+    }
+
+    pub fn release(self: *Self, index: i32) void {
+        const idx = @intCast(usize, index);
+
+        debug.assert(self.states[idx] == .used);
+        debug.assert(self.fds[idx] != -1);
+
+        self.states[idx] = .free;
+        self.fds[idx] = -1;
+    }
+};
+
 const ServerContext = struct {
     const Self = @This();
 
     root_allocator: *mem.Allocator,
     ring: *IO_Uring,
     clients: std.ArrayList(Client),
-    client_id_seq: Client.ID,
-    fds: [max_connections]os.fd_t,
+    registered_fds: RegisteredFileDescriptors,
 
     pub fn init(allocator: *mem.Allocator, ring: *IO_Uring) !Self {
         var res = Self{
             .root_allocator = allocator,
             .ring = ring,
             .clients = try std.ArrayList(Client).initCapacity(allocator, max_connections),
-            .client_id_seq = 0,
-            .fds = [_]os.fd_t{-1} ** max_connections,
+            .registered_fds = .{},
         };
         return res;
     }
 
     pub fn deinit(self: *Self) void {
         self.clients.deinit();
-    }
-
-    pub fn registerFileDescriptors(self: *Self) !void {
-        try self.ring.register_files(self.fds[0..]);
-    }
-    pub fn updateFileDescriptors(self: *Self) !void {
-        try self.ring.register_files_update(0, self.fds[0..]);
     }
 
     pub fn handleAccept(self: *Self, cqe: os.linux.io_uring_cqe, remote_addr: *net.Address) !void {
@@ -185,18 +235,16 @@ const ServerContext = struct {
         const client_fd = @intCast(os.socket_t, cqe.res);
 
         var client = try self.clients.addOne();
+        try client.init(self.root_allocator, remote_addr.*, client_fd);
 
-        const client_id = self.client_id_seq;
-        self.client_id_seq += 1;
-
-        try client.init(self.root_allocator, client_id, remote_addr.*, client_fd);
-
-        try submitRead(self, client, client_fd, 0);
+        _ = try submitRead(self, client, client_fd, 0);
     }
 
     pub fn disconnectClient(self: *Self, client: *Client) void {
         _ = self.ring.close(0, client.fd) catch {};
 
+        // Cleanup resources
+        releaseRegisteredFileDescriptor(self, client);
         client.deinit();
 
         var pos = for (self.clients.items) |*item, i| {
@@ -214,6 +262,16 @@ const ServerContext = struct {
         }
     }
 };
+
+fn releaseRegisteredFileDescriptor(ctx: *ServerContext, client: *Client) void {
+    if (client.registered_fd) |registered_fd| {
+        ctx.registered_fds.release(registered_fd);
+        ctx.registered_fds.update(ctx.ring) catch |err| {
+            logger.err("unable to update registered file descriptors, err={}", .{err});
+        };
+        client.registered_fd = null;
+    }
+}
 
 const Client = struct {
     const Self = @This();
@@ -247,10 +305,6 @@ const Client = struct {
         }
     };
 
-    const ID = usize;
-
-    id: ID,
-
     gpa: *mem.Allocator,
 
     addr: net.Address,
@@ -272,10 +326,12 @@ const Client = struct {
 
     response: Response = .{},
 
-    pub fn init(self: *Self, allocator: *mem.Allocator, id: ID, remote_addr: net.Address, client_fd: os.socket_t) !void {
+    // non-null if the client was able to acquire a registered file descriptor.
+    registered_fd: ?i32 = null,
+
+    pub fn init(self: *Self, allocator: *mem.Allocator, remote_addr: net.Address, client_fd: os.socket_t) !void {
         self.* = .{
             .gpa = allocator,
-            .id = id,
             .addr = remote_addr,
             .fd = client_fd,
             .buffer = undefined,
@@ -358,7 +414,7 @@ fn handleReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !v
 
         logger.debug("addr={s} HTTP request incomplete, submitting read", .{client.addr});
 
-        try submitRead(ctx, client, client.fd, 0);
+        _ = try submitRead(ctx, client, client.fd, 0);
     }
 }
 
@@ -400,7 +456,7 @@ fn handleReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
         });
 
         // Not enough data, read more.
-        try submitRead(ctx, client, client.fd, 0);
+        _ = try submitRead(ctx, client, client.fd, 0);
         return;
     }
 
@@ -434,9 +490,11 @@ fn handleOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cq
 
     logger.debug("addr={s} HANDLE OPEN FILE fd={}", .{ client.addr, client.response.file.fd });
 
-    // Add the file descriptor to the registered file descriptors.
-    ctx.fds[client.id] = client.response.file.fd;
-    try ctx.updateFileDescriptors();
+    // Try to acquire a registered file descriptor.
+    client.registered_fd = ctx.registered_fds.acquire(client.response.file.fd);
+    if (client.registered_fd != null) {
+        try ctx.registered_fds.update(ctx.ring);
+    }
 
     client.state = .statx_response_file;
 
@@ -490,7 +548,12 @@ fn handleStatxResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
 
     client.state = .read_response_file;
 
-    try submitRead(ctx, client, client.response.file.fd, 0);
+    if (client.registered_fd) |registered_fd| {
+        var sqe = try submitRead(ctx, client, registered_fd, 0);
+        sqe.flags |= os.linux.IOSQE_FIXED_FILE;
+    } else {
+        _ = try submitRead(ctx, client, client.response.file.fd, 0);
+    }
 }
 
 fn handleReadResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
@@ -564,7 +627,12 @@ fn handleWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
         client.buffer.clearRetainingCapacity();
         client.state = .read_response_file;
 
-        try submitRead(ctx, client, client.response.file.fd, 0);
+        if (client.registered_fd) |registered_fd| {
+            var sqe = try submitRead(ctx, client, registered_fd, 0);
+            sqe.flags |= os.linux.IOSQE_FIXED_FILE;
+        } else {
+            _ = try submitRead(ctx, client, client.response.file.fd, 0);
+        }
         return;
     }
 
@@ -573,12 +641,19 @@ fn handleWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
     });
 
     // Response file written, read the next request
+
+    releaseRegisteredFileDescriptor(ctx, client);
+    // Close the response file descriptor
+    try submitClose(ctx, client, client.response.file.fd);
+    client.response.file.fd = -1;
+
+    // Reset the client state
     client.request = .{};
     client.response = .{};
     client.buffer.clearRetainingCapacity();
     client.state = .read_request;
 
-    try submitRead(ctx, client, client.fd, 0);
+    _ = try submitRead(ctx, client, client.fd, 0);
 }
 
 fn handleWriteResponseBuffer(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
@@ -619,7 +694,7 @@ fn handleWriteResponseBuffer(ctx: *ServerContext, client: *Client, cqe: io_uring
     client.buffer.clearRetainingCapacity();
     client.state = .read_request;
 
-    try submitRead(ctx, client, client.fd, 0);
+    _ = try submitRead(ctx, client, client.fd, 0);
 }
 
 fn submitWriteNotFound(ctx: *ServerContext, client: *Client) !void {
@@ -696,7 +771,7 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
             client.state = .read_body;
             client.request.content_length = n;
 
-            try submitRead(ctx, client, client.fd, 0);
+            _ = try submitRead(ctx, client, client.fd, 0);
             return;
         }
 
@@ -738,20 +813,30 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
     try submitWrite(ctx, client, client.fd, 0);
 }
 
-fn submitRead(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u64) !void {
+fn submitClose(ctx: *ServerContext, client: *Client, fd: os.fd_t) !void {
+    logger.debug("addr={s} submitting close of {d}", .{
+        client.addr,
+        fd,
+    });
+
+    // NOTE(vincent): should we also handle close CQEs ?
+    var sqe = try ctx.ring.close(0, fd);
+    _ = sqe;
+}
+
+fn submitRead(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u64) !*io_uring_sqe {
     logger.debug("addr={s} submitting read from {d}, offset {d}", .{
         client.addr,
         fd,
         offset,
     });
 
-    var sqe = try ctx.ring.read(
+    return ctx.ring.read(
         @ptrToInt(client),
         fd,
         &client.temp_buffer,
         offset,
     );
-    _ = sqe;
 }
 
 fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.fd_t, offset: u64) !void {
@@ -805,6 +890,27 @@ fn submitStatxFile(ctx: *ServerContext, client: *Client, fd: os.fd_t, flags: u32
     _ = sqe;
 }
 
+const StandaloneCQE = enum {
+    close,
+};
+const max_int_standalone_cqe = @enumToInt(StandaloneCQE.close);
+
+fn handleStandaloneCQE(cqe: io_uring_cqe) void {
+    const typ = @intToEnum(StandaloneCQE, cqe.user_data);
+    switch (typ) {
+        .close => {
+            switch (cqe.err()) {
+                .SUCCESS => {
+                    logger.debug("closed file descriptor", .{});
+                },
+                else => |err| {
+                    logger.err("unable to close file descriptor, unexpected errno={d}", .{err});
+                },
+            }
+        },
+    }
+}
+
 pub fn main() anyerror!void {
     var gpa = heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit()) {
@@ -838,7 +944,7 @@ pub fn main() anyerror!void {
     // Initialize server context
     var ctx = try ServerContext.init(allocator, &ring);
     defer ctx.deinit();
-    try ctx.registerFileDescriptors();
+    try ctx.registered_fds.register(&ring);
 
     var remote_addr = net.Address{
         .any = undefined,
@@ -849,6 +955,8 @@ pub fn main() anyerror!void {
     var iteration: usize = 0;
 
     while (true) : (iteration += 1) {
+        // std.time.sleep(300 * std.time.ns_per_ms);
+
         if (!accept_waiting and ctx.clients.items.len < max_connections) {
             const sqe = try ring.accept(
                 @ptrToInt(&remote_addr),
@@ -865,22 +973,19 @@ pub fn main() anyerror!void {
 
         const cqe = try ring.copy_cqe();
 
-        if (cqe.user_data == 0) {
-            logger.debug("cqe without user data, not doing anything", .{});
+        if (cqe.user_data <= max_int_standalone_cqe) {
+            handleStandaloneCQE(cqe);
         } else if (cqe.user_data == @ptrToInt(&remote_addr)) {
             try ctx.handleAccept(cqe, &remote_addr);
             accept_waiting = false;
-        } else {
-            for (ctx.clients.items) |*client| {
-                if (cqe.user_data != @ptrToInt(client)) {
-                    continue;
-                }
-
-                dispatch(&ctx, client, cqe);
-                break;
+            continue;
+        } else for (ctx.clients.items) |*client| {
+            if (cqe.user_data != @ptrToInt(client)) {
+                continue;
             }
-        }
 
-        std.time.sleep(300 * std.time.ns_per_ms);
+            dispatch(&ctx, client, cqe);
+            break;
+        }
     }
 }
