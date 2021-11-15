@@ -243,13 +243,9 @@ const ServerContext = struct {
     pub fn disconnectClient(self: *Self, client: *Client) void {
         _ = self.ring.close(0, client.fd) catch {};
 
+        // Cleanup resources
+        releaseRegisteredFileDescriptor(self, client);
         client.deinit();
-        if (client.registered_fd) |registered_fd| {
-            self.registered_fds.release(registered_fd);
-            self.registered_fds.update(self.ring) catch |err| {
-                logger.err("unable to update registered file descriptors, err={}", .{err});
-            };
-        }
 
         var pos = for (self.clients.items) |*item, i| {
             if (item == client) {
@@ -266,6 +262,16 @@ const ServerContext = struct {
         }
     }
 };
+
+fn releaseRegisteredFileDescriptor(ctx: *ServerContext, client: *Client) void {
+    if (client.registered_fd) |registered_fd| {
+        ctx.registered_fds.release(registered_fd);
+        ctx.registered_fds.update(ctx.ring) catch |err| {
+            logger.err("unable to update registered file descriptors, err={}", .{err});
+        };
+        client.registered_fd = null;
+    }
+}
 
 const Client = struct {
     const Self = @This();
@@ -635,6 +641,9 @@ fn handleWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
     });
 
     // Response file written, read the next request
+
+    releaseRegisteredFileDescriptor(ctx, client);
+
     client.request = .{};
     client.response = .{};
     client.buffer.clearRetainingCapacity();
