@@ -643,7 +643,11 @@ fn handleWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
     // Response file written, read the next request
 
     releaseRegisteredFileDescriptor(ctx, client);
+    // Close the response file descriptor
+    try submitClose(ctx, client, client.response.file.fd);
+    client.response.file.fd = -1;
 
+    // Reset the client state
     client.request = .{};
     client.response = .{};
     client.buffer.clearRetainingCapacity();
@@ -809,6 +813,17 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
     try submitWrite(ctx, client, client.fd, 0);
 }
 
+fn submitClose(ctx: *ServerContext, client: *Client, fd: os.fd_t) !void {
+    logger.debug("addr={s} submitting close of {d}", .{
+        client.addr,
+        fd,
+    });
+
+    // NOTE(vincent): should we also handle close CQEs ?
+    var sqe = try ctx.ring.close(0, fd);
+    _ = sqe;
+}
+
 fn submitRead(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u64) !*io_uring_sqe {
     logger.debug("addr={s} submitting read from {d}, offset {d}", .{
         client.addr,
@@ -875,6 +890,27 @@ fn submitStatxFile(ctx: *ServerContext, client: *Client, fd: os.fd_t, flags: u32
     _ = sqe;
 }
 
+const StandaloneCQE = enum {
+    close,
+};
+const max_int_standalone_cqe = @enumToInt(StandaloneCQE.close);
+
+fn handleStandaloneCQE(cqe: io_uring_cqe) void {
+    const typ = @intToEnum(StandaloneCQE, cqe.user_data);
+    switch (typ) {
+        .close => {
+            switch (cqe.err()) {
+                .SUCCESS => {
+                    logger.debug("closed file descriptor", .{});
+                },
+                else => |err| {
+                    logger.err("unable to close file descriptor, unexpected errno={d}", .{err});
+                },
+            }
+        },
+    }
+}
+
 pub fn main() anyerror!void {
     var gpa = heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit()) {
@@ -919,6 +955,8 @@ pub fn main() anyerror!void {
     var iteration: usize = 0;
 
     while (true) : (iteration += 1) {
+        // std.time.sleep(300 * std.time.ns_per_ms);
+
         if (!accept_waiting and ctx.clients.items.len < max_connections) {
             const sqe = try ring.accept(
                 @ptrToInt(&remote_addr),
@@ -935,22 +973,19 @@ pub fn main() anyerror!void {
 
         const cqe = try ring.copy_cqe();
 
-        if (cqe.user_data == 0) {
-            logger.debug("cqe without user data, not doing anything", .{});
+        if (cqe.user_data <= max_int_standalone_cqe) {
+            handleStandaloneCQE(cqe);
         } else if (cqe.user_data == @ptrToInt(&remote_addr)) {
             try ctx.handleAccept(cqe, &remote_addr);
             accept_waiting = false;
-        } else {
-            for (ctx.clients.items) |*client| {
-                if (cqe.user_data != @ptrToInt(client)) {
-                    continue;
-                }
-
-                dispatch(&ctx, client, cqe);
-                break;
+            continue;
+        } else for (ctx.clients.items) |*client| {
+            if (cqe.user_data != @ptrToInt(client)) {
+                continue;
             }
-        }
 
-        // std.time.sleep(300 * std.time.ns_per_ms);
+            dispatch(&ctx, client, cqe);
+            break;
+        }
     }
 }
