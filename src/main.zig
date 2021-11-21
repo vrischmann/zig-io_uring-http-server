@@ -227,7 +227,7 @@ const ServerContext = struct {
         switch (cqe.err()) {
             .SUCCESS => {},
             else => |err| {
-                logger.err("unexpected errno={d}", .{err});
+                logger.err("unexpected errno={}", .{err});
                 return error.Unexpected;
             },
         }
@@ -391,7 +391,7 @@ fn handleReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !v
             return error.ConnectionResetByPeer;
         },
         else => |err| {
-            logger.err("addr={s} unexpected errno={d}", .{ client.addr, err });
+            logger.err("addr={s} unexpected errno={}", .{ client.addr, err });
             return error.Unexpected;
         },
     }
@@ -432,7 +432,7 @@ fn handleReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
             return error.ConnectionResetByPeer;
         },
         else => |err| {
-            logger.err("addr={s} unexpected errno={d}", .{ client.addr, err });
+            logger.err("addr={s} unexpected errno={}", .{ client.addr, err });
             return error.Unexpected;
         },
     }
@@ -481,7 +481,7 @@ fn handleOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cq
             return;
         },
         else => |err| {
-            logger.err("addr={s} unexpected errno={d}", .{ client.addr, err });
+            logger.err("addr={s} unexpected errno={}", .{ client.addr, err });
             return error.Unexpected;
         },
     }
@@ -517,7 +517,7 @@ fn handleStatxResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
     switch (cqe.err()) {
         .SUCCESS => {},
         else => |err| {
-            logger.err("addr={s} unexpected errno={d}", .{ client.addr, err });
+            logger.err("addr={s} unexpected errno={}", .{ client.addr, err });
             return error.Unexpected;
         },
     }
@@ -563,7 +563,7 @@ fn handleReadResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cq
     switch (cqe.err()) {
         .SUCCESS => {},
         else => |err| {
-            logger.err("addr={s} HANDLE READ RESPONSE FILE unexpected errno={d}", .{ client.addr, err });
+            logger.err("addr={s} HANDLE READ RESPONSE FILE unexpected errno={}", .{ client.addr, err });
             return error.Unexpected;
         },
     }
@@ -593,7 +593,7 @@ fn handleWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
     switch (cqe.err()) {
         .SUCCESS => {},
         else => |err| {
-            logger.err("addr={s} HANDLE WRITE RESPONSE FILE unexpected errno={d}", .{ client.addr, err });
+            logger.err("addr={s} HANDLE WRITE RESPONSE FILE unexpected errno={}", .{ client.addr, err });
             return error.Unexpected;
         },
     }
@@ -670,7 +670,7 @@ fn handleWriteResponseBuffer(ctx: *ServerContext, client: *Client, cqe: io_uring
             return error.ConnectionResetByPeer;
         },
         else => |err| {
-            logger.err("addr={s} unexpected errno={d}", .{ client.addr, err });
+            logger.err("addr={s} unexpected errno={}", .{ client.addr, err });
             return error.Unexpected;
         },
     }
@@ -904,7 +904,7 @@ fn handleStandaloneCQE(cqe: io_uring_cqe) void {
                     logger.debug("closed file descriptor", .{});
                 },
                 else => |err| {
-                    logger.err("unable to close file descriptor, unexpected errno={d}", .{err});
+                    logger.err("unable to close file descriptor, unexpected errno={}", .{err});
                 },
             }
         },
