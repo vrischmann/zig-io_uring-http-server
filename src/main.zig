@@ -823,12 +823,17 @@ fn submitWriteNotFound(ctx: *ServerContext, client: *Client) !void {
     try submitWrite(ctx, client, client.fd, 0);
 }
 
+fn truncateBody(body: []const u8, max_size: usize) []const u8 {
+    const min = std.math.min(max_size, body.len);
+    return body[0..min];
+}
+
 fn processRequestWithBody(ctx: *ServerContext, client: *Client) !void {
     _ = ctx;
 
     logger.debug("addr={s} body data=\"{s}\" size={s}", .{
         client.addr,
-        fmt.fmtSliceEscapeLower(client.buffer.items),
+        fmt.fmtSliceEscapeLower(truncateBody(client.buffer.items, 20)),
         fmt.fmtIntSizeBin(@intCast(u64, client.buffer.items.len)),
     });
 
@@ -885,7 +890,7 @@ fn processRequest(ctx: *ServerContext, client: *Client) ProcessRequestError!void
             logger.debug("addr={s} body incomplete, usable={d} bytes, body data=\"{s}\", content length: {d} bytes", .{
                 client.addr,
                 client.buffer.items.len,
-                fmt.fmtSliceEscapeLower(client.buffer.items),
+                fmt.fmtSliceEscapeLower(truncateBody(client.buffer.items, 20)),
                 n,
             });
 
@@ -965,7 +970,7 @@ fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.fd_t, offset: u64) !
         fmt.fmtIntSizeBin(client.buffer.items.len),
         fd,
         offset,
-        fmt.fmtSliceEscapeLower(client.buffer.items),
+        fmt.fmtSliceEscapeLower(truncateBody(client.buffer.items, 20)),
     });
 
     var sqe = try ctx.ring.write(
