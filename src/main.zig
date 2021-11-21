@@ -866,7 +866,7 @@ fn submitOpenFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flag
     var sqe = try ctx.ring.openat(
         @ptrToInt(client),
         os.linux.AT.FDCWD,
-        client.response.file.path,
+        path,
         flags,
         mode,
     );
