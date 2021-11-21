@@ -472,6 +472,8 @@ fn handleOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cq
     switch (cqe.err()) {
         .SUCCESS => {},
         .NOENT => {
+            client.temp_buffer_fba.reset();
+
             logger.err("addr={s} no such file or directory, path=\"{s}\"", .{
                 client.addr,
                 fmt.fmtSliceEscapeLower(client.response.file.path),
@@ -489,6 +491,8 @@ fn handleOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cq
     client.response.file.fd = @intCast(os.fd_t, cqe.res);
 
     logger.debug("addr={s} HANDLE OPEN FILE fd={}", .{ client.addr, client.response.file.fd });
+
+    client.temp_buffer_fba.reset();
 
     // Try to acquire a registered file descriptor.
     client.registered_fd = ctx.registered_fds.acquire(client.response.file.fd);
