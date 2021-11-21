@@ -161,18 +161,10 @@ const RegisteredFileDescriptors = struct {
     states: [max_connections]State = [_]State{.free} ** max_connections,
 
     pub fn register(self: *Self, ring: *IO_Uring) !void {
-        logger.debug("REGISTERED FILE DESCRIPTORS, fds={d}", .{
-            self.fds,
-        });
-
         try ring.register_files(self.fds[0..]);
     }
 
     pub fn update(self: *Self, ring: *IO_Uring) !void {
-        logger.debug("UPDATE FILE DESCRIPTORS, fds={d}", .{
-            self.fds,
-        });
-
         try ring.register_files_update(0, self.fds[0..]);
     }
 
@@ -228,8 +220,6 @@ const ServerContext = struct {
     }
 
     pub fn handleAccept(self: *Self, cqe: os.linux.io_uring_cqe, remote_addr: *net.Address) !void {
-        logger.debug("HANDLE ACCEPT accepting connection from {s}", .{remote_addr});
-
         switch (cqe.err()) {
             .SUCCESS => {},
             else => |err| {
@@ -262,8 +252,6 @@ const ServerContext = struct {
         };
 
         if (pos) |i| {
-            logger.debug("DISCONNECT CLIENT removing client {d}", .{i});
-
             _ = self.clients.orderedRemove(i);
         }
     }
@@ -438,12 +426,6 @@ fn handleReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) Ha
 
     const read = @intCast(usize, cqe.res);
 
-    logger.debug("addr={s} HANDLE READ REQUEST read of {d} bytes into buffer id {d} succeeded", .{
-        client.addr,
-        read,
-        buffer_id,
-    });
-
     const previous_len = client.buffer.items.len;
 
     // Append the read data into the client dynamic buffer and re-provide the buffer for further requests.
@@ -456,8 +438,6 @@ fn handleReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) Ha
         try processRequest(ctx, client);
     } else {
         // Not enough data, read more.
-
-        logger.debug("addr={s} HTTP request incomplete, submitting read", .{client.addr});
 
         _ = try submitRead(ctx, client, client.fd, 0);
     }
@@ -505,12 +485,6 @@ fn handleReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
 
     const read = @intCast(usize, cqe.res);
 
-    logger.debug("addr={s} HANDLE READ BODY read of {d} bytes into buffer id {d} succeeded", .{
-        client.addr,
-        read,
-        buffer_id,
-    });
-
     // Append the read data into the client dynamic buffer and re-provide the buffer for further requests.
     try client.buffer.appendSlice(buffer[0..read]);
     try submitProvideBuffers(ctx, client, buffer_id);
@@ -518,12 +492,6 @@ fn handleReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
     const content_length = client.request.content_length.?;
 
     if (client.buffer.items.len < content_length) {
-        logger.debug("addr={s} buffer len={d} bytes, content length={d} bytes", .{
-            client.addr,
-            client.buffer.items.len,
-            content_length,
-        });
-
         // Not enough data, read more.
         _ = try submitRead(ctx, client, client.fd, 0);
         return;
@@ -565,8 +533,6 @@ fn handleOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cq
 
     client.response.file.fd = @intCast(os.fd_t, cqe.res);
 
-    logger.debug("addr={s} HANDLE OPEN FILE fd={}", .{ client.addr, client.response.file.fd });
-
     // Try to acquire a registered file descriptor.
     client.registered_fd = ctx.registered_fds.acquire(client.response.file.fd);
     if (client.registered_fd != null) {
@@ -601,13 +567,6 @@ fn handleStatxResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
             return error.Unexpected;
         },
     }
-
-    logger.debug("addr={s} HANDLE STATX FILE path=\"{s}\" fd={}, size={s}", .{
-        client.addr,
-        client.response.file.path,
-        client.response.file.fd,
-        fmt.fmtIntSizeBin(client.response.file.statx_buf.size),
-    });
 
     // Release memory for the duped file path.
     client.temp_buffer_fba.reset();
@@ -670,13 +629,6 @@ fn handleReadResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cq
 
     const read = @intCast(usize, cqe.res);
 
-    logger.debug("addr={s} HANDLE READ RESPONSE FILE read of {d} bytes from {d} into buffer id {d} succeeded", .{
-        client.addr,
-        read,
-        client.response.file.fd,
-        buffer_id,
-    });
-
     try client.buffer.appendSlice(buffer[0..read]);
     try submitProvideBuffers(ctx, client, buffer_id);
 
@@ -701,12 +653,6 @@ fn handleWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
     }
 
     const written = @intCast(usize, cqe.res);
-
-    logger.debug("addr={s} HANDLE WRITE RESPONSE FILE write of {d} bytes to {d} succeeded", .{
-        client.addr,
-        written,
-        client.fd,
-    });
 
     client.response.written += written;
 
@@ -734,10 +680,6 @@ fn handleWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
         }
         return;
     }
-
-    logger.debug("addr={s} HANDLE WRITE RESPONSE FILE done", .{
-        client.addr,
-    });
 
     // Response file written, read the next request
 
@@ -786,8 +728,6 @@ fn handleWriteResponseBuffer(ctx: *ServerContext, client: *Client, cqe: io_uring
         return;
     }
 
-    logger.debug("HANDLE WRITE RESPONSE done", .{});
-
     // Response written, read the next request
     client.request = .{};
     client.buffer.clearRetainingCapacity();
@@ -798,10 +738,6 @@ fn handleWriteResponseBuffer(ctx: *ServerContext, client: *Client, cqe: io_uring
 
 fn submitWriteNotFound(ctx: *ServerContext, client: *Client) !void {
     _ = ctx;
-
-    logger.debug("addr={s} returning 404 Not Found", .{
-        client.addr,
-    });
 
     const static_response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
 
@@ -818,12 +754,6 @@ fn truncateBody(body: []const u8, max_size: usize) []const u8 {
 
 fn processRequestWithBody(ctx: *ServerContext, client: *Client) !void {
     _ = ctx;
-
-    logger.debug("addr={s} body data=\"{s}\" size={s}", .{
-        client.addr,
-        fmt.fmtSliceEscapeLower(truncateBody(client.buffer.items, 20)),
-        fmt.fmtIntSizeBin(@intCast(u64, client.buffer.items.len)),
-    });
 
     // TODO(vincent): actually do something
 
@@ -848,15 +778,6 @@ const ProcessRequestError = error{
 fn processRequest(ctx: *ServerContext, client: *Client) ProcessRequestError!void {
     const req = client.request.result.req;
 
-    logger.debug("addr={s} parsed HTTP request", .{client.addr});
-
-    logger.debug("addr={s} method: {s}, path: {s}, minor version: {d}", .{
-        client.addr,
-        req.getMethod(),
-        req.getPath(),
-        req.getMinorVersion(),
-    });
-
     const content_length = try req.iterateHeaders(
         struct {
             fn do(name: []const u8, value: []const u8) !?usize {
@@ -868,20 +789,11 @@ fn processRequest(ctx: *ServerContext, client: *Client) ProcessRequestError!void
         }.do,
     );
 
-    logger.debug("addr={s} content length: {d}", .{ client.addr, content_length });
-
     // If there's a content length we switch to reading the body.
     if (content_length) |n| {
         try client.buffer.replaceRange(0, client.request.result.consumed, &[0]u8{});
 
         if (n > client.buffer.items.len) {
-            logger.debug("addr={s} body incomplete, usable={d} bytes, body data=\"{s}\", content length: {d} bytes", .{
-                client.addr,
-                client.buffer.items.len,
-                fmt.fmtSliceEscapeLower(truncateBody(client.buffer.items, 20)),
-                n,
-            });
-
             client.state = .read_body;
             client.request.content_length = n;
 
@@ -915,8 +827,6 @@ fn processRequest(ctx: *ServerContext, client: *Client) ProcessRequestError!void
         return;
     }
 
-    logger.debug("path: {s}", .{client.request.result.req.getPath()});
-
     // TODO(vincent): actually do something
 
     const static_response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
@@ -928,10 +838,7 @@ fn processRequest(ctx: *ServerContext, client: *Client) ProcessRequestError!void
 }
 
 fn submitClose(ctx: *ServerContext, client: *Client, fd: os.fd_t) !void {
-    logger.debug("addr={s} submitting close of {d}", .{
-        client.addr,
-        fd,
-    });
+    _ = client;
 
     // NOTE(vincent): should we also handle close CQEs ?
     var sqe = try ctx.ring.close(0, fd);
@@ -939,12 +846,6 @@ fn submitClose(ctx: *ServerContext, client: *Client, fd: os.fd_t) !void {
 }
 
 fn submitRead(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u64) !*io_uring_sqe {
-    logger.debug("addr={s} submitting read from {d}, offset {d}", .{
-        client.addr,
-        fd,
-        offset,
-    });
-
     var sqe = try ctx.ring.read_raw(@ptrToInt(client), fd, null, max_buffer_size, offset);
     sqe.flags |= os.linux.IOSQE_BUFFER_SELECT;
     sqe.buf_index = buffer_group_id;
@@ -953,14 +854,6 @@ fn submitRead(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u64
 }
 
 fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.fd_t, offset: u64) !void {
-    logger.debug("addr={s} submitting write of {s} to {d}, offset {d}, data=\"{s}\"", .{
-        client.addr,
-        fmt.fmtIntSizeBin(client.buffer.items.len),
-        fd,
-        offset,
-        fmt.fmtSliceEscapeLower(truncateBody(client.buffer.items, 20)),
-    });
-
     var sqe = try ctx.ring.write(
         @ptrToInt(client),
         fd,
@@ -971,10 +864,7 @@ fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.fd_t, offset: u64) !
 }
 
 fn submitOpenFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flags: u32, mode: os.mode_t) !void {
-    logger.debug("addr={s} submitting open, path=\"{s}\"", .{
-        client.addr,
-        fmt.fmtSliceEscapeLower(path),
-    });
+    _ = path;
 
     var sqe = try ctx.ring.openat(
         @ptrToInt(client),
@@ -987,11 +877,6 @@ fn submitOpenFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flag
 }
 
 fn submitStatxFile(ctx: *ServerContext, client: *Client, fd: os.fd_t, flags: u32, mask: u32, buf: *os.linux.Statx) !void {
-    logger.debug("addr={s} submitting statx, fd={d}", .{
-        client.addr,
-        fd,
-    });
-
     var sqe = try ctx.ring.statx(
         @ptrToInt(client),
         fd,
@@ -1013,9 +898,7 @@ fn handleStandaloneCQE(cqe: io_uring_cqe) void {
     switch (typ) {
         .close => {
             switch (cqe.err()) {
-                .SUCCESS => {
-                    logger.debug("closed file descriptor", .{});
-                },
+                .SUCCESS => {},
                 else => |err| {
                     logger.err("unable to close file descriptor, unexpected errno={}", .{err});
                 },
@@ -1025,7 +908,7 @@ fn handleStandaloneCQE(cqe: io_uring_cqe) void {
 }
 
 fn submitProvideBuffers(ctx: *ServerContext, client: *Client, buffer_id: usize) !void {
-    logger.debug("addr={s} providing buffer id {d}", .{ client.addr, buffer_id });
+    _ = client;
 
     ctx.provide_buffers.last = .{
         .id = buffer_id,
@@ -1086,15 +969,8 @@ const ProvideBuffers = struct {
 };
 
 fn handleProvideBuffers(cqe: io_uring_cqe) !void {
-    const provide_buffers = @intToPtr(*ProvideBuffers, cqe.user_data);
     switch (cqe.err()) {
-        .SUCCESS => {
-            logger.debug("PROVIDE BUFFERS successfully provided {d} buffers of {s} each, starting at id {d}", .{
-                provide_buffers.last.num,
-                fmt.fmtIntSizeBin(max_buffer_size),
-                provide_buffers.last.id,
-            });
-        },
+        .SUCCESS => {},
         else => |err| {
             logger.err("PROVIDE BUFFERS unexpected errno={}", .{err});
             return error.Unexpected;
