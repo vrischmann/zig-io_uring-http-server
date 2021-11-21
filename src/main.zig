@@ -15,8 +15,12 @@ const io_uring_cqe = std.os.linux.io_uring_cqe;
 const io_uring_sqe = std.os.linux.io_uring_sqe;
 
 const max_ring_entries = 512;
-const max_buffer_size = 4096;
 const max_connections = 128;
+
+const max_buffers = 16;
+const max_buffer_size = 4096;
+
+const buffer_group_id = 42;
 
 const logger = std.log.scoped(.main);
 
@@ -204,6 +208,7 @@ const ServerContext = struct {
 
     root_allocator: mem.Allocator,
     ring: *IO_Uring,
+    provide_buffers: *ProvideBuffers,
 
     clients: struct {
         list: std.ArrayList(*Client),
@@ -212,10 +217,11 @@ const ServerContext = struct {
 
     registered_fds: RegisteredFileDescriptors,
 
-    pub fn init(allocator: mem.Allocator, ring: *IO_Uring) !Self {
+    pub fn init(allocator: mem.Allocator, ring: *IO_Uring, provide_buffers: *ProvideBuffers) !Self {
         var res = Self{
             .root_allocator = allocator,
             .ring = ring,
+            .provide_buffers = provide_buffers,
             .clients = .{
                 .list = try std.ArrayList(*Client).initCapacity(allocator, max_connections),
                 .connected = 0,
@@ -371,10 +377,10 @@ pub fn dispatch(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) void {
         switch (err) {
             // TODO(vincent): interpret error
             error.UnexpectedEOF, error.ConnectionResetByPeer => {
-                logger.debug("read request failed, err: {}", .{err});
+                logger.debug("handle {s} failed with unexpected EOF, err: {}", .{ @tagName(client.state), err });
             },
             else => {
-                logger.err("read request failed, err: {}", .{err});
+                logger.err("handle {s} failed, err: {}", .{ @tagName(client.state), err });
             },
         }
 
@@ -382,8 +388,25 @@ pub fn dispatch(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) void {
     };
 }
 
-fn handleReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+const HandleReadRequestError = error{
+    BrokenPipe,
+    ConnectionResetByPeer,
+    Unexpected,
+    UnexpectedEOF,
+
+    // When calling appendSlice
+    OutOfMemory,
+
+    // From IO_Uring
+    SubmissionQueueFull,
+} || ProcessRequestError;
+
+fn handleReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) HandleReadRequestError!void {
     debug.assert(client.state == .read_request);
+
+    const buffer_id = cqe.flags >> 16;
+    debug.assert(buffer_id >= 0 and buffer_id < max_buffers);
+    const buffer = ctx.provide_buffers.get(buffer_id);
 
     switch (cqe.err()) {
         .SUCCESS => {},
@@ -391,26 +414,52 @@ fn handleReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !v
             logger.err("addr={s} broken pipe", .{client.addr});
             return error.BrokenPipe;
         },
-        .CONNRESET => {
-            logger.debug("addr={s} connection reset by peer", .{client.addr});
-            return error.ConnectionResetByPeer;
-        },
         else => |err| {
-            logger.err("addr={s} unexpected errno={}", .{ client.addr, err });
-            return error.Unexpected;
+            // Read failed, provide the buffer again
+            try submitProvideBuffers(ctx, client, buffer_id);
+
+            switch (err) {
+                .PIPE => {
+                    logger.err("addr={s} broken pipe", .{client.addr});
+                    return error.BrokenPipe;
+                },
+                .CONNRESET => {
+                    logger.err("addr={s} connection reset by peer", .{client.addr});
+                    return error.ConnectionResetByPeer;
+                },
+                else => {
+                    logger.err("addr={s} unexpected errno={}", .{ client.addr, err });
+                    return error.Unexpected;
+                },
+            }
         },
     }
     if (cqe.res <= 0) {
+        // Read failed, provide the buffer again
+        try submitProvideBuffers(ctx, client, buffer_id);
+
         return error.UnexpectedEOF;
     }
 
+    //
+    // Read succeeded
+    //
+
     const read = @intCast(usize, cqe.res);
 
-    logger.debug("addr={s} HANDLE READ REQUEST read of {d} bytes succeeded", .{ client.addr, read });
+    logger.debug("addr={s} HANDLE READ REQUEST read of {d} bytes into buffer id {d} succeeded", .{
+        client.addr,
+        read,
+        buffer_id,
+    });
 
     const previous_len = client.buffer.items.len;
-    try client.buffer.appendSlice(client.temp_buffer[0..read]);
 
+    // Append the read data into the client dynamic buffer and re-provide the buffer for further requests.
+    try client.buffer.appendSlice(buffer[0..read]);
+    try submitProvideBuffers(ctx, client, buffer_id);
+
+    // Try to parse the request using the full dynamic buffer.
     if (try parseRequest(previous_len, client.buffer.items)) |result| {
         client.request.result = result;
         try processRequest(ctx, client);
@@ -426,30 +475,54 @@ fn handleReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !v
 fn handleReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
     debug.assert(client.state == .read_body);
 
+    const buffer_id = cqe.flags >> 16;
+    debug.assert(buffer_id >= 0 and buffer_id < max_buffers);
+    const buffer = ctx.provide_buffers.get(buffer_id);
+
     switch (cqe.err()) {
         .SUCCESS => {},
-        .PIPE => {
-            logger.err("addr={s} broken pipe", .{client.addr});
-            return error.BrokenPipe;
-        },
-        .CONNRESET => {
-            logger.err("addr={s} connection reset by peer", .{client.addr});
-            return error.ConnectionResetByPeer;
-        },
         else => |err| {
-            logger.err("addr={s} unexpected errno={}", .{ client.addr, err });
-            return error.Unexpected;
+            // Read failed, provide the buffer again
+            try submitProvideBuffers(ctx, client, buffer_id);
+
+            switch (err) {
+                .PIPE => {
+                    logger.err("addr={s} broken pipe", .{client.addr});
+                    return error.BrokenPipe;
+                },
+                .CONNRESET => {
+                    logger.err("addr={s} connection reset by peer", .{client.addr});
+                    return error.ConnectionResetByPeer;
+                },
+                else => {
+                    logger.err("addr={s} unexpected errno={}", .{ client.addr, err });
+                    return error.Unexpected;
+                },
+            }
         },
     }
     if (cqe.res <= 0) {
+        // Read failed, provide the buffer again
+        try submitProvideBuffers(ctx, client, buffer_id);
+
         return error.UnexpectedEOF;
     }
 
+    //
+    // Read succeeded
+    //
+
     const read = @intCast(usize, cqe.res);
 
-    logger.debug("addr={s} HANDLE READ BODY read of {d} bytes succeeded", .{ client.addr, read });
+    logger.debug("addr={s} HANDLE READ BODY read of {d} bytes into buffer id {d} succeeded", .{
+        client.addr,
+        read,
+        buffer_id,
+    });
 
-    try client.buffer.appendSlice(client.temp_buffer[0..read]);
+    // Append the read data into the client dynamic buffer and re-provide the buffer for further requests.
+    try client.buffer.appendSlice(buffer[0..read]);
+    try submitProvideBuffers(ctx, client, buffer_id);
 
     const content_length = client.request.content_length.?;
 
@@ -465,6 +538,7 @@ fn handleReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
         return;
     }
 
+    // Body is complete, process it
     try processRequestWithBody(ctx, client);
 }
 
@@ -476,20 +550,25 @@ fn handleOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cq
 
     switch (cqe.err()) {
         .SUCCESS => {},
-        .NOENT => {
+        else => |err| {
+            // Release memory for the duped file path.
             client.temp_buffer_fba.reset();
 
-            logger.err("addr={s} no such file or directory, path=\"{s}\"", .{
-                client.addr,
-                fmt.fmtSliceEscapeLower(client.response.file.path),
-            });
+            switch (err) {
+                .NOENT => {
+                    logger.err("addr={s} no such file or directory, path=\"{s}\"", .{
+                        client.addr,
+                        fmt.fmtSliceEscapeLower(client.response.file.path),
+                    });
 
-            try submitWriteNotFound(ctx, client);
-            return;
-        },
-        else => |err| {
-            logger.err("addr={s} unexpected errno={}", .{ client.addr, err });
-            return error.Unexpected;
+                    try submitWriteNotFound(ctx, client);
+                    return;
+                },
+                else => {
+                    logger.err("addr={s} unexpected errno={}", .{ client.addr, err });
+                    return error.Unexpected;
+                },
+            }
         },
     }
 
@@ -527,6 +606,9 @@ fn handleStatxResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
     switch (cqe.err()) {
         .SUCCESS => {},
         else => |err| {
+            // Release memory for the duped file path.
+            client.temp_buffer_fba.reset();
+
             logger.err("addr={s} unexpected errno={}", .{ client.addr, err });
             return error.Unexpected;
         },
@@ -538,6 +620,9 @@ fn handleStatxResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
         client.response.file.fd,
         fmt.fmtIntSizeBin(client.response.file.statx_buf.size),
     });
+
+    // Release memory for the duped file path.
+    client.temp_buffer_fba.reset();
 
     // Prepare the preambule + headers
 
@@ -570,26 +655,42 @@ fn handleReadResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cq
     debug.assert(client.state == .read_response_file);
     debug.assert(client.buffer.items.len > 0);
 
+    const buffer_id = cqe.flags >> 16;
+    debug.assert(buffer_id >= 0 and buffer_id < max_buffers);
+    const buffer = ctx.provide_buffers.get(buffer_id);
+
     switch (cqe.err()) {
         .SUCCESS => {},
         else => |err| {
+            // Read failed, provide the buffer again
+            try submitProvideBuffers(ctx, client, buffer_id);
+
             logger.err("addr={s} HANDLE READ RESPONSE FILE unexpected errno={}", .{ client.addr, err });
             return error.Unexpected;
         },
     }
     if (cqe.res <= 0) {
+        // Read failed, provide the buffer again
+        try submitProvideBuffers(ctx, client, buffer_id);
+
         return error.UnexpectedEOF;
     }
 
+    //
+    // Read succeeded
+    //
+
     const read = @intCast(usize, cqe.res);
 
-    logger.debug("addr={s} HANDLE READ RESPONSE FILE read of {d} bytes from {d} succeeded", .{
+    logger.debug("addr={s} HANDLE READ RESPONSE FILE read of {d} bytes from {d} into buffer id {d} succeeded", .{
         client.addr,
         read,
         client.response.file.fd,
+        buffer_id,
     });
 
-    try client.buffer.appendSlice(client.temp_buffer[0..read]);
+    try client.buffer.appendSlice(buffer[0..read]);
+    try submitProvideBuffers(ctx, client, buffer_id);
 
     client.state = .write_response_file;
 
@@ -741,7 +842,17 @@ fn processRequestWithBody(ctx: *ServerContext, client: *Client) !void {
     try submitWrite(ctx, client, client.fd, 0);
 }
 
-fn processRequest(ctx: *ServerContext, client: *Client) !void {
+const ProcessRequestError = error{
+    InvalidFilePath,
+
+    // When calling replaceRange
+    OutOfMemory,
+
+    // From IO_Uring
+    SubmissionQueueFull,
+} || fmt.ParseIntError;
+
+fn processRequest(ctx: *ServerContext, client: *Client) ProcessRequestError!void {
     const req = client.request.result.req;
 
     logger.debug("addr={s} parsed HTTP request", .{client.addr});
@@ -841,12 +952,11 @@ fn submitRead(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u64
         offset,
     });
 
-    return ctx.ring.read(
-        @ptrToInt(client),
-        fd,
-        &client.temp_buffer,
-        offset,
-    );
+    var sqe = try ctx.ring.read_raw(@ptrToInt(client), fd, null, max_buffer_size, offset);
+    sqe.flags |= os.linux.IOSQE_BUFFER_SELECT;
+    sqe.buf_index = buffer_group_id;
+
+    return sqe;
 }
 
 fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.fd_t, offset: u64) !void {
@@ -921,6 +1031,84 @@ fn handleStandaloneCQE(cqe: io_uring_cqe) void {
     }
 }
 
+fn submitProvideBuffers(ctx: *ServerContext, client: *Client, buffer_id: usize) !void {
+    logger.debug("addr={s} providing buffer id {d}", .{ client.addr, buffer_id });
+
+    ctx.provide_buffers.last = .{
+        .id = buffer_id,
+        .num = 1,
+    };
+
+    var sqe = try ctx.ring.provide_buffers(
+        @ptrToInt(ctx.provide_buffers),
+        ctx.provide_buffers.getRaw(buffer_id),
+        1,
+        max_buffer_size,
+        buffer_group_id,
+        buffer_id,
+    );
+    _ = sqe;
+}
+
+const ProvideBuffers = struct {
+    allocator: mem.Allocator,
+    num: usize,
+    buffer: []u8,
+
+    last: struct {
+        id: usize = -1,
+        num: usize = -1,
+    } = .{},
+
+    pub fn init(allocator: mem.Allocator, num: usize) !ProvideBuffers {
+        const total_len = num * max_buffer_size;
+        return ProvideBuffers{
+            .allocator = allocator,
+            .num = num,
+            .buffer = try allocator.alloc(u8, total_len),
+            .last = .{
+                .id = 0,
+                .num = num,
+            },
+        };
+    }
+
+    pub fn deinit(self: *ProvideBuffers) void {
+        self.allocator.free(self.buffer);
+    }
+
+    pub fn getRaw(self: *ProvideBuffers, id: usize) [*c]u8 {
+        const slice = self.get(id);
+        return @ptrCast([*c]u8, slice.ptr);
+    }
+
+    pub fn get(self: *ProvideBuffers, id: usize) []u8 {
+        debug.assert(id < self.num);
+
+        const start = id * max_buffer_size;
+        const end = start + max_buffer_size;
+
+        return self.buffer[start..end];
+    }
+};
+
+fn handleProvideBuffers(cqe: io_uring_cqe) !void {
+    const provide_buffers = @intToPtr(*ProvideBuffers, cqe.user_data);
+    switch (cqe.err()) {
+        .SUCCESS => {
+            logger.debug("PROVIDE BUFFERS successfully provided {d} buffers of {s} each, starting at id {d}", .{
+                provide_buffers.last.num,
+                fmt.fmtIntSizeBin(max_buffer_size),
+                provide_buffers.last.id,
+            });
+        },
+        else => |err| {
+            logger.err("PROVIDE BUFFERS unexpected errno={}", .{err});
+            return error.Unexpected;
+        },
+    }
+}
+
 pub fn main() anyerror!void {
     var gpa = heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit()) {
@@ -954,8 +1142,23 @@ pub fn main() anyerror!void {
     var ring = try std.os.linux.IO_Uring.init(max_ring_entries, 0);
     defer ring.deinit();
 
+    // Provide some initial buffers
+    //
+    var provide_buffers = try ProvideBuffers.init(allocator, max_buffers);
+    defer provide_buffers.deinit();
+
+    _ = try ring.provide_buffers(
+        @ptrToInt(&provide_buffers),
+        provide_buffers.buffer.ptr,
+        provide_buffers.num,
+        max_buffer_size,
+        buffer_group_id,
+        0,
+    );
+
     // Initialize server context
-    var ctx = try ServerContext.init(allocator, &ring);
+    //
+    var ctx = try ServerContext.init(allocator, &ring, &provide_buffers);
     defer ctx.deinit();
     try ctx.registered_fds.register(&ring);
 
@@ -994,6 +1197,8 @@ pub fn main() anyerror!void {
         for (cqes[0..cqe_count]) |cqe| {
             if (cqe.user_data <= max_int_standalone_cqe) {
                 handleStandaloneCQE(cqe);
+            } else if (cqe.user_data == @ptrToInt(&provide_buffers)) {
+                try handleProvideBuffers(cqe);
             } else if (cqe.user_data == @ptrToInt(&remote_addr)) {
                 try ctx.handleAccept(cqe, &remote_addr);
                 accept_waiting = false;
