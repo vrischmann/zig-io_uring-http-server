@@ -365,7 +365,7 @@ pub fn dispatch(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) void {
     res catch |err| {
         switch (err) {
             // TODO(vincent): interpret error
-            error.UnexpectedEOF => {
+            error.UnexpectedEOF, error.ConnectionResetByPeer => {
                 logger.debug("read request failed, err: {}", .{err});
             },
             else => {
