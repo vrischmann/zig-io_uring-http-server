@@ -495,10 +495,11 @@ fn handleOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cq
     client.temp_buffer_fba.reset();
 
     // Try to acquire a registered file descriptor.
-    client.registered_fd = ctx.registered_fds.acquire(client.response.file.fd);
-    if (client.registered_fd != null) {
-        try ctx.registered_fds.update(ctx.ring);
-    }
+    // NOTE(vincent): constantly updating the registered file descriptors crashes the kernel
+    // client.registered_fd = ctx.registered_fds.acquire(client.response.file.fd);
+    // if (client.registered_fd != null) {
+    //     try ctx.registered_fds.update(ctx.ring);
+    // }
 
     client.state = .statx_response_file;
 
