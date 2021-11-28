@@ -4,7 +4,18 @@ pub fn build(b: *std.build.Builder) void {
     const target = b.standardTargetOptions(.{});
     const mode = b.standardReleaseOptions();
 
-    const picohttp = b.addStaticLibrary("picohttp", "src/picohttpparser.c");
+    const picohttp_flags = switch (mode) {
+        .Debug => &[_][]const u8{},
+        .ReleaseFast, .ReleaseSafe => &[_][]const u8{
+            "-O3",
+        },
+        .ReleaseSmall => &[_][]const u8{
+            "-O0",
+        },
+    };
+
+    const picohttp = b.addStaticLibrary("picohttp", null);
+    picohttp.addCSourceFile("src/picohttpparser.c", picohttp_flags);
     picohttp.linkLibC();
 
     const exe = b.addExecutable("zig-io_uring-test", "src/main.zig");
