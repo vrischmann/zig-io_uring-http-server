@@ -16,7 +16,7 @@ const io_uring_sqe = std.os.linux.io_uring_sqe;
 
 const max_ring_entries = 512;
 const max_buffer_size = 4096;
-const max_connections = 2;
+const max_connections = 128;
 
 const logger = std.log.scoped(.main);
 
