@@ -387,7 +387,7 @@ fn handleReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !v
             return error.BrokenPipe;
         },
         .CONNRESET => {
-            logger.err("addr={s} connection reset by peer", .{client.addr});
+            logger.debug("addr={s} connection reset by peer", .{client.addr});
             return error.ConnectionResetByPeer;
         },
         else => |err| {
