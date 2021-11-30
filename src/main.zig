@@ -730,7 +730,7 @@ fn processRequestWithBody(ctx: *ServerContext, client: *Client) !void {
 
     // TODO(vincent): actually do something
 
-    const static_response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!\r\n";
+    const static_response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
 
     client.setBuffer(static_response);
     client.state = .write_response_buffer;
@@ -812,7 +812,7 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
 
     // TODO(vincent): actually do something
 
-    const static_response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!\r\n";
+    const static_response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
 
     client.setBuffer(static_response);
     client.state = .write_response_buffer;
