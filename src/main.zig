@@ -346,7 +346,9 @@ const Client = struct {
     }
 
     pub fn setBuffer(self: *Self, data: []const u8) void {
+        self.buffer.expandToCapacity();
         self.buffer.items = self.buffer.items[0..data.len];
+
         mem.copy(u8, self.buffer.items, data);
     }
 };
