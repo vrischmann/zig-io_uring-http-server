@@ -16,6 +16,8 @@ pub fn build(b: *std.build.Builder) void {
 
     const picohttp = b.addStaticLibrary("picohttp", null);
     picohttp.addCSourceFile("src/picohttpparser.c", picohttp_flags);
+    picohttp.setTarget(target);
+    picohttp.setBuildMode(mode);
     picohttp.linkLibC();
 
     const exe = b.addExecutable("zig-io_uring-test", "src/main.zig");
