@@ -204,21 +204,33 @@ const ServerContext = struct {
 
     root_allocator: mem.Allocator,
     ring: *IO_Uring,
-    clients: std.ArrayList(Client),
+
+    clients: struct {
+        list: std.ArrayList(*Client),
+        connected: usize,
+    },
+
     registered_fds: RegisteredFileDescriptors,
 
     pub fn init(allocator: mem.Allocator, ring: *IO_Uring) !Self {
         var res = Self{
             .root_allocator = allocator,
             .ring = ring,
-            .clients = try std.ArrayList(Client).initCapacity(allocator, max_connections),
+            .clients = .{
+                .list = try std.ArrayList(*Client).initCapacity(allocator, max_connections),
+                .connected = 0,
+            },
             .registered_fds = .{},
         };
         return res;
     }
 
     pub fn deinit(self: *Self) void {
-        self.clients.deinit();
+        for (self.clients.list.items) |client| {
+            client.deinit();
+            self.root_allocator.destroy(client);
+        }
+        self.clients.list.deinit();
     }
 
     pub fn handleAccept(self: *Self, cqe: os.linux.io_uring_cqe, remote_addr: *net.Address) !void {
@@ -234,8 +246,13 @@ const ServerContext = struct {
 
         const client_fd = @intCast(os.socket_t, cqe.res);
 
-        var client = try self.clients.addOne();
+        var client = try self.root_allocator.create(Client);
+        errdefer self.root_allocator.destroy(client);
+
         try client.init(self.root_allocator, remote_addr.*, client_fd);
+        errdefer client.deinit();
+
+        try self.clients.list.append(client);
 
         _ = try submitRead(self, client, client_fd, 0);
     }
@@ -246,20 +263,6 @@ const ServerContext = struct {
         // Cleanup resources
         releaseRegisteredFileDescriptor(self, client);
         client.deinit();
-
-        var pos = for (self.clients.items) |*item, i| {
-            if (item == client) {
-                break i;
-            }
-        } else blk: {
-            break :blk null;
-        };
-
-        if (pos) |i| {
-            logger.debug("DISCONNECT CLIENT removing client {d}", .{i});
-
-            _ = self.clients.orderedRemove(i);
-        }
     }
 };
 
@@ -925,6 +928,10 @@ pub fn main() anyerror!void {
     };
     var allocator = gpa.allocator();
 
+    // NOTE(vincent): for debugging
+    // var logging_allocator = heap.loggingAllocator(gpa.allocator());
+    // var allocator = logging_allocator.allocator();
+
     //
     // Ignore broken pipes
     var act = os.Sigaction{
@@ -963,9 +970,11 @@ pub fn main() anyerror!void {
     var cqes: [max_ring_entries]io_uring_cqe = undefined;
 
     while (true) : (iteration += 1) {
+        // NOTE(vincent): for debugging
+        // if (iteration > 3) break;
         // std.time.sleep(300 * std.time.ns_per_ms);
 
-        if (!accept_waiting and ctx.clients.items.len < max_connections) {
+        if (!accept_waiting and ctx.clients.connected < max_connections) {
             const sqe = try ring.accept(
                 @ptrToInt(&remote_addr),
                 server_fd,
@@ -989,13 +998,9 @@ pub fn main() anyerror!void {
                 try ctx.handleAccept(cqe, &remote_addr);
                 accept_waiting = false;
                 continue;
-            } else for (ctx.clients.items) |*client| {
-                if (cqe.user_data != @ptrToInt(client)) {
-                    continue;
-                }
-
+            } else {
+                var client = @intToPtr(*Client, cqe.user_data);
                 dispatch(&ctx, client, cqe);
-                break;
             }
         }
     }
