@@ -202,12 +202,12 @@ const RegisteredFileDescriptors = struct {
 const ServerContext = struct {
     const Self = @This();
 
-    root_allocator: *mem.Allocator,
+    root_allocator: mem.Allocator,
     ring: *IO_Uring,
     clients: std.ArrayList(Client),
     registered_fds: RegisteredFileDescriptors,
 
-    pub fn init(allocator: *mem.Allocator, ring: *IO_Uring) !Self {
+    pub fn init(allocator: mem.Allocator, ring: *IO_Uring) !Self {
         var res = Self{
             .root_allocator = allocator,
             .ring = ring,
@@ -305,7 +305,7 @@ const Client = struct {
         }
     };
 
-    gpa: *mem.Allocator,
+    gpa: mem.Allocator,
 
     addr: net.Address,
     fd: os.socket_t,
@@ -329,7 +329,7 @@ const Client = struct {
     // non-null if the client was able to acquire a registered file descriptor.
     registered_fd: ?i32 = null,
 
-    pub fn init(self: *Self, allocator: *mem.Allocator, remote_addr: net.Address, client_fd: os.socket_t) !void {
+    pub fn init(self: *Self, allocator: mem.Allocator, remote_addr: net.Address, client_fd: os.socket_t) !void {
         self.* = .{
             .gpa = allocator,
             .addr = remote_addr,
@@ -793,7 +793,7 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
             return error.InvalidFilePath;
         }
 
-        client.response.file.path = try client.temp_buffer_fba.allocator.dupeZ(u8, path);
+        client.response.file.path = try client.temp_buffer_fba.allocator().dupeZ(u8, path);
 
         client.buffer.clearRetainingCapacity();
         client.state = .open_response_file;
@@ -923,8 +923,7 @@ pub fn main() anyerror!void {
     defer if (gpa.deinit()) {
         debug.panic("leaks detected", .{});
     };
-
-    var allocator = &gpa.allocator;
+    var allocator = gpa.allocator();
 
     //
     // Ignore broken pipes
