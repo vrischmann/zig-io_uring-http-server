@@ -960,6 +960,8 @@ pub fn main() anyerror!void {
     var accept_waiting: bool = false;
     var iteration: usize = 0;
 
+    var cqes: [max_ring_entries]io_uring_cqe = undefined;
+
     while (true) : (iteration += 1) {
         // std.time.sleep(300 * std.time.ns_per_ms);
 
@@ -977,21 +979,24 @@ pub fn main() anyerror!void {
 
         _ = try ring.submit_and_wait(1);
 
-        const cqe = try ring.copy_cqe();
+        const cqe_count = try ring.copy_cqes(&cqes, 1);
+        assert(cqe_count > 0);
 
-        if (cqe.user_data <= max_int_standalone_cqe) {
-            handleStandaloneCQE(cqe);
-        } else if (cqe.user_data == @ptrToInt(&remote_addr)) {
-            try ctx.handleAccept(cqe, &remote_addr);
-            accept_waiting = false;
-            continue;
-        } else for (ctx.clients.items) |*client| {
-            if (cqe.user_data != @ptrToInt(client)) {
+        for (cqes[0..cqe_count]) |cqe| {
+            if (cqe.user_data <= max_int_standalone_cqe) {
+                handleStandaloneCQE(cqe);
+            } else if (cqe.user_data == @ptrToInt(&remote_addr)) {
+                try ctx.handleAccept(cqe, &remote_addr);
+                accept_waiting = false;
                 continue;
-            }
+            } else for (ctx.clients.items) |*client| {
+                if (cqe.user_data != @ptrToInt(client)) {
+                    continue;
+                }
 
-            dispatch(&ctx, client, cqe);
-            break;
+                dispatch(&ctx, client, cqe);
+                break;
+            }
         }
     }
 }
