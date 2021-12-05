@@ -338,7 +338,7 @@ const Client = struct {
         };
         self.temp_buffer_fba = heap.FixedBufferAllocator.init(&self.temp_buffer);
 
-        self.buffer = try std.ArrayList(u8).initCapacity(self.gpa, 128);
+        self.buffer = try std.ArrayList(u8).initCapacity(self.gpa, max_buffer_size);
     }
 
     pub fn deinit(self: *Self) void {
