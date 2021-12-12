@@ -997,7 +997,6 @@ pub fn main() anyerror!void {
             } else if (cqe.user_data == @ptrToInt(&remote_addr)) {
                 try ctx.handleAccept(cqe, &remote_addr);
                 accept_waiting = false;
-                continue;
             } else {
                 var client = @intToPtr(*Client, cqe.user_data);
                 dispatch(&ctx, client, cqe);
