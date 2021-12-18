@@ -199,6 +199,59 @@ const RegisteredFileDescriptors = struct {
     }
 };
 
+const Callback = struct {
+    context: *Client,
+    call: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void,
+
+    next: ?*Callback = null,
+};
+
+const CallbackPool = struct {
+    const Self = @This();
+
+    allocator: mem.Allocator,
+    free_list: ?*Callback,
+
+    pub fn init(allocator: mem.Allocator) !Self {
+        var res = Self{
+            .allocator = allocator,
+            .free_list = null,
+        };
+
+        var i: usize = 0;
+        while (i < max_connections * 32) : (i += 1) {
+            const callback = try allocator.create(Callback);
+            callback.* = .{
+                .context = undefined,
+                .call = undefined,
+                .next = res.free_list,
+            };
+            res.free_list = callback;
+        }
+
+        return res;
+    }
+
+    pub fn deinit(self: *Self) void {
+        while (self.get()) |item| {
+            self.allocator.destroy(item);
+        }
+    }
+
+    pub fn get(self: *Self) ?*Callback {
+        const ret = self.free_list orelse return null;
+        self.free_list = ret.next;
+        ret.next = null;
+        return ret;
+    }
+
+    pub fn put(self: *Self, callback: *Callback) void {
+        callback.call = undefined;
+        callback.next = self.free_list;
+        self.free_list = callback;
+    }
+};
+
 const ServerContext = struct {
     const Self = @This();
 
@@ -209,6 +262,7 @@ const ServerContext = struct {
         list: std.ArrayList(*Client),
         connected: usize,
     },
+    callbacks: CallbackPool,
 
     registered_fds: RegisteredFileDescriptors,
 
@@ -220,6 +274,7 @@ const ServerContext = struct {
                 .list = try std.ArrayList(*Client).initCapacity(allocator, max_connections),
                 .connected = 0,
             },
+            .callbacks = try CallbackPool.init(allocator),
             .registered_fds = .{},
         };
         return res;
@@ -231,6 +286,7 @@ const ServerContext = struct {
             self.root_allocator.destroy(client);
         }
         self.clients.list.deinit();
+        self.callbacks.deinit();
     }
 
     pub fn handleAccept(self: *Self, cqe: os.linux.io_uring_cqe, remote_addr: *net.Address) !void {
@@ -254,7 +310,7 @@ const ServerContext = struct {
 
         try self.clients.list.append(client);
 
-        _ = try submitRead(self, client, client_fd, 0);
+        _ = try submitRead(self, client, client_fd, 0, onReadRequest);
     }
 
     pub fn disconnectClient(self: *Self, client: *Client) void {
@@ -278,16 +334,6 @@ fn releaseRegisteredFileDescriptor(ctx: *ServerContext, client: *Client) void {
 
 const Client = struct {
     const Self = @This();
-
-    const State = enum {
-        read_request,
-        read_body,
-        write_response_buffer,
-        open_response_file,
-        statx_response_file,
-        read_response_file,
-        write_response_file,
-    };
 
     const Response = struct {
         written: usize = 0,
@@ -318,8 +364,6 @@ const Client = struct {
     temp_buffer_fba: heap.FixedBufferAllocator = undefined,
 
     buffer: std.ArrayList(u8),
-
-    state: State = .read_request,
 
     request: struct {
         result: ParseRequestResult = undefined,
@@ -356,34 +400,8 @@ const Client = struct {
     }
 };
 
-pub fn dispatch(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) void {
-    var res = switch (client.state) {
-        .read_request => handleReadRequest(ctx, client, cqe),
-        .read_body => handleReadBody(ctx, client, cqe),
-        .open_response_file => handleOpenResponseFile(ctx, client, cqe),
-        .statx_response_file => handleStatxResponseFile(ctx, client, cqe),
-        .read_response_file => handleReadResponseFile(ctx, client, cqe),
-        .write_response_file => handleWriteResponseFile(ctx, client, cqe),
-        .write_response_buffer => handleWriteResponseBuffer(ctx, client, cqe),
-    };
-
-    res catch |err| {
-        switch (err) {
-            // TODO(vincent): interpret error
-            error.UnexpectedEOF, error.ConnectionResetByPeer => {
-                logger.debug("read request failed, err: {}", .{err});
-            },
-            else => {
-                logger.err("read request failed, err: {}", .{err});
-            },
-        }
-
-        ctx.disconnectClient(client);
-    };
-}
-
-fn handleReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
-    debug.assert(client.state == .read_request);
+fn onReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+    _ = ctx;
 
     switch (cqe.err()) {
         .SUCCESS => {},
@@ -406,7 +424,7 @@ fn handleReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !v
 
     const read = @intCast(usize, cqe.res);
 
-    logger.debug("addr={s} HANDLE READ REQUEST read of {d} bytes succeeded", .{ client.addr, read });
+    logger.debug("addr={s} ON READ REQUEST read of {d} bytes succeeded", .{ client.addr, read });
 
     const previous_len = client.buffer.items.len;
     try client.buffer.appendSlice(client.temp_buffer[0..read]);
@@ -419,12 +437,12 @@ fn handleReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !v
 
         logger.debug("addr={s} HTTP request incomplete, submitting read", .{client.addr});
 
-        _ = try submitRead(ctx, client, client.fd, 0);
+        _ = try submitRead(ctx, client, client.fd, 0, onReadRequest);
     }
 }
 
-fn handleReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
-    debug.assert(client.state == .read_body);
+fn onReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+    _ = ctx;
 
     switch (cqe.err()) {
         .SUCCESS => {},
@@ -447,7 +465,7 @@ fn handleReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
 
     const read = @intCast(usize, cqe.res);
 
-    logger.debug("addr={s} HANDLE READ BODY read of {d} bytes succeeded", .{ client.addr, read });
+    logger.debug("addr={s} ON READ BODY read of {d} bytes succeeded", .{ client.addr, read });
 
     try client.buffer.appendSlice(client.temp_buffer[0..read]);
 
@@ -461,15 +479,14 @@ fn handleReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void
         });
 
         // Not enough data, read more.
-        _ = try submitRead(ctx, client, client.fd, 0);
+        _ = try submitRead(ctx, client, client.fd, 0, onReadBody);
         return;
     }
 
-    try processRequestWithBody(ctx, client);
+    // try processRequestWithBody(ctx, client);
 }
 
-fn handleOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
-    debug.assert(client.state == .open_response_file);
+fn onOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
     debug.assert(client.buffer.items.len == 0);
 
     _ = ctx;
@@ -506,8 +523,6 @@ fn handleOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cq
     //     try ctx.registered_fds.update(ctx.ring);
     // }
 
-    client.state = .statx_response_file;
-
     try submitStatxFile(
         ctx,
         client,
@@ -515,11 +530,11 @@ fn handleOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cq
         os.linux.AT.EMPTY_PATH,
         os.linux.STATX_SIZE,
         &client.response.file.statx_buf,
+        onStatxResponseFile,
     );
 }
 
-fn handleStatxResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
-    debug.assert(client.state == .statx_response_file);
+fn onStatxResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
     debug.assert(client.buffer.items.len == 0);
 
     _ = ctx;
@@ -556,18 +571,15 @@ fn handleStatxResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
 
     //
 
-    client.state = .read_response_file;
-
     if (client.registered_fd) |registered_fd| {
-        var sqe = try submitRead(ctx, client, registered_fd, 0);
+        var sqe = try submitRead(ctx, client, registered_fd, 0, onReadResponseFile);
         sqe.flags |= os.linux.IOSQE_FIXED_FILE;
     } else {
-        _ = try submitRead(ctx, client, client.response.file.fd, 0);
+        _ = try submitRead(ctx, client, client.response.file.fd, 0, onReadResponseFile);
     }
 }
 
-fn handleReadResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
-    debug.assert(client.state == .read_response_file);
+fn onReadResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
     debug.assert(client.buffer.items.len > 0);
 
     switch (cqe.err()) {
@@ -591,13 +603,10 @@ fn handleReadResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cq
 
     try client.buffer.appendSlice(client.temp_buffer[0..read]);
 
-    client.state = .write_response_file;
-
-    try submitWrite(ctx, client, client.fd, 0);
+    try submitWrite(ctx, client, client.fd, 0, onWriteResponseFile);
 }
 
-fn handleWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
-    debug.assert(client.state == .write_response_file);
+fn onWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
     debug.assert(client.buffer.items.len > 0);
 
     switch (cqe.err()) {
@@ -627,7 +636,7 @@ fn handleWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
         // Remove the already written data
         try client.buffer.replaceRange(0, written, &[0]u8{});
 
-        try submitWrite(ctx, client, client.fd, 0);
+        try submitWrite(ctx, client, client.fd, 0, onWriteResponseFile);
         return;
     }
 
@@ -635,13 +644,12 @@ fn handleWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
         // More data to read from the file, submit another read
 
         client.buffer.clearRetainingCapacity();
-        client.state = .read_response_file;
 
         if (client.registered_fd) |registered_fd| {
-            var sqe = try submitRead(ctx, client, registered_fd, 0);
+            var sqe = try submitRead(ctx, client, registered_fd, 0, onReadResponseFile);
             sqe.flags |= os.linux.IOSQE_FIXED_FILE;
         } else {
-            _ = try submitRead(ctx, client, client.response.file.fd, 0);
+            _ = try submitRead(ctx, client, client.response.file.fd, 0, onReadResponseFile);
         }
         return;
     }
@@ -661,14 +669,11 @@ fn handleWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_c
     client.request = .{};
     client.response = .{};
     client.buffer.clearRetainingCapacity();
-    client.state = .read_request;
 
-    _ = try submitRead(ctx, client, client.fd, 0);
+    _ = try submitRead(ctx, client, client.fd, 0, onReadRequest);
 }
 
-fn handleWriteResponseBuffer(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
-    debug.assert(client.state == .write_response_buffer);
-
+fn onWriteResponseBuffer(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
     switch (cqe.err()) {
         .SUCCESS => {},
         .PIPE => {
@@ -693,7 +698,7 @@ fn handleWriteResponseBuffer(ctx: *ServerContext, client: *Client, cqe: io_uring
         // Remove the already written data
         try client.buffer.replaceRange(0, written, &[0]u8{});
 
-        try submitWrite(ctx, client, client.fd, 0);
+        try submitWrite(ctx, client, client.fd, 0, onWriteResponseBuffer);
         return;
     }
 
@@ -702,9 +707,8 @@ fn handleWriteResponseBuffer(ctx: *ServerContext, client: *Client, cqe: io_uring
     // Response written, read the next request
     client.request = .{};
     client.buffer.clearRetainingCapacity();
-    client.state = .read_request;
 
-    _ = try submitRead(ctx, client, client.fd, 0);
+    _ = try submitRead(ctx, client, client.fd, 0, onReadRequest);
 }
 
 fn submitWriteNotFound(ctx: *ServerContext, client: *Client) !void {
@@ -717,9 +721,8 @@ fn submitWriteNotFound(ctx: *ServerContext, client: *Client) !void {
     const static_response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
 
     client.setBuffer(static_response);
-    client.state = .write_response_buffer;
 
-    try submitWrite(ctx, client, client.fd, 0);
+    try submitWrite(ctx, client, client.fd, 0, onWriteResponseBuffer);
 }
 
 fn processRequestWithBody(ctx: *ServerContext, client: *Client) !void {
@@ -736,9 +739,8 @@ fn processRequestWithBody(ctx: *ServerContext, client: *Client) !void {
     const static_response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
 
     client.setBuffer(static_response);
-    client.state = .write_response_buffer;
 
-    try submitWrite(ctx, client, client.fd, 0);
+    try submitWrite(ctx, client, client.fd, 0, onWriteResponseBuffer);
 }
 
 fn processRequest(ctx: *ServerContext, client: *Client) !void {
@@ -778,10 +780,9 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
                 n,
             });
 
-            client.state = .read_body;
             client.request.content_length = n;
 
-            _ = try submitRead(ctx, client, client.fd, 0);
+            _ = try submitRead(ctx, client, client.fd, 0, onReadBody);
             return;
         }
 
@@ -799,7 +800,6 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
         client.response.file.path = try client.temp_buffer_fba.allocator().dupeZ(u8, path);
 
         client.buffer.clearRetainingCapacity();
-        client.state = .open_response_file;
 
         try submitOpenFile(
             ctx,
@@ -807,6 +807,7 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
             client.response.file.path,
             os.linux.O.RDONLY | os.linux.O.NOFOLLOW,
             0644,
+            onOpenResponseFile,
         );
         return;
     }
@@ -818,9 +819,8 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
     const static_response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
 
     client.setBuffer(static_response);
-    client.state = .write_response_buffer;
 
-    try submitWrite(ctx, client, client.fd, 0);
+    try submitWrite(ctx, client, client.fd, 0, onWriteResponseBuffer);
 }
 
 fn submitClose(ctx: *ServerContext, client: *Client, fd: os.fd_t) !void {
@@ -834,22 +834,28 @@ fn submitClose(ctx: *ServerContext, client: *Client, fd: os.fd_t) !void {
     _ = sqe;
 }
 
-fn submitRead(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u64) !*io_uring_sqe {
+fn submitRead(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u64, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) !*io_uring_sqe {
     logger.debug("addr={s} submitting read from {d}, offset {d}", .{
         client.addr,
         fd,
         offset,
     });
 
+    var tmp = ctx.callbacks.get() orelse return error.OutOfCallback;
+    tmp.* = .{
+        .context = client,
+        .call = cb,
+    };
+
     return ctx.ring.read(
-        @ptrToInt(client),
+        @ptrToInt(tmp),
         fd,
         &client.temp_buffer,
         offset,
     );
 }
 
-fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.fd_t, offset: u64) !void {
+fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.fd_t, offset: u64, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) !void {
     logger.debug("addr={s} submitting write of {s} to {d}, offset {d}, data=\"{s}\"", .{
         client.addr,
         fmt.fmtIntSizeBin(client.buffer.items.len),
@@ -858,8 +864,14 @@ fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.fd_t, offset: u64) !
         fmt.fmtSliceEscapeLower(client.buffer.items),
     });
 
+    var tmp = ctx.callbacks.get() orelse return error.OutOfCallback;
+    tmp.* = .{
+        .context = client,
+        .call = cb,
+    };
+
     var sqe = try ctx.ring.write(
-        @ptrToInt(client),
+        @ptrToInt(tmp),
         fd,
         client.buffer.items,
         offset,
@@ -867,14 +879,20 @@ fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.fd_t, offset: u64) !
     _ = sqe;
 }
 
-fn submitOpenFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flags: u32, mode: os.mode_t) !void {
+fn submitOpenFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flags: u32, mode: os.mode_t, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) !void {
     logger.debug("addr={s} submitting open, path=\"{s}\"", .{
         client.addr,
         fmt.fmtSliceEscapeLower(path),
     });
 
+    var tmp = ctx.callbacks.get() orelse return error.OutOfCallback;
+    tmp.* = .{
+        .context = client,
+        .call = cb,
+    };
+
     var sqe = try ctx.ring.openat(
-        @ptrToInt(client),
+        @ptrToInt(tmp),
         os.linux.AT.FDCWD,
         path,
         flags,
@@ -883,14 +901,20 @@ fn submitOpenFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flag
     _ = sqe;
 }
 
-fn submitStatxFile(ctx: *ServerContext, client: *Client, fd: os.fd_t, flags: u32, mask: u32, buf: *os.linux.Statx) !void {
+fn submitStatxFile(ctx: *ServerContext, client: *Client, fd: os.fd_t, flags: u32, mask: u32, buf: *os.linux.Statx, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) !void {
     logger.debug("addr={s} submitting statx, fd={d}", .{
         client.addr,
         fd,
     });
 
+    var tmp = ctx.callbacks.get() orelse return error.OutOfCallback;
+    tmp.* = .{
+        .context = client,
+        .call = cb,
+    };
+
     var sqe = try ctx.ring.statx(
-        @ptrToInt(client),
+        @ptrToInt(tmp),
         fd,
         "",
         flags,
@@ -992,15 +1016,40 @@ pub fn main() anyerror!void {
         assert(cqe_count > 0);
 
         for (cqes[0..cqe_count]) |cqe| {
+            // CQE not associated with a client.
+
             if (cqe.user_data <= max_int_standalone_cqe) {
                 handleStandaloneCQE(cqe);
-            } else if (cqe.user_data == @ptrToInt(&remote_addr)) {
+
+                continue;
+            }
+
+            // Accept CQE
+
+            if (cqe.user_data == @ptrToInt(&remote_addr)) {
                 try ctx.handleAccept(cqe, &remote_addr);
                 accept_waiting = false;
-            } else {
-                var client = @intToPtr(*Client, cqe.user_data);
-                dispatch(&ctx, client, cqe);
+
+                continue;
             }
+
+            // CQE associated with a client and callback/
+
+            var cb = @intToPtr(*Callback, cqe.user_data);
+            defer ctx.callbacks.put(cb);
+
+            cb.call(&ctx, cb.context, cqe) catch |err| {
+                switch (err) {
+                    error.UnexpectedEOF => {
+                        logger.debug("unexpected eof", .{});
+                    },
+                    else => {
+                        logger.err("unexpected error {s}", .{err});
+                    },
+                }
+
+                ctx.disconnectClient(cb.context);
+            };
         }
     }
 }
