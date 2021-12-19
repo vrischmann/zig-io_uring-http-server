@@ -258,6 +258,25 @@ const ServerContext = struct {
     root_allocator: mem.Allocator,
     ring: *IO_Uring,
 
+    //
+    // Listener state
+    //
+
+    listener: struct {
+        server_fd: os.socket_t,
+
+        accept_waiting: bool = false,
+
+        // Next peer we're accepting
+        peer_addr: net.Address = net.Address{
+            .any = undefined,
+        },
+        peer_addr_size: u32 = @sizeOf(os.sockaddr),
+    },
+
+    // CQEs storage
+    cqes: [max_ring_entries]io_uring_cqe = undefined,
+
     clients: struct {
         list: std.ArrayList(*Client),
         connected: usize,
@@ -266,10 +285,13 @@ const ServerContext = struct {
 
     registered_fds: RegisteredFileDescriptors,
 
-    pub fn init(allocator: mem.Allocator, ring: *IO_Uring) !Self {
+    pub fn init(allocator: mem.Allocator, ring: *IO_Uring, server_fd: os.socket_t) !Self {
         var res = Self{
             .root_allocator = allocator,
             .ring = ring,
+            .listener = .{
+                .server_fd = server_fd,
+            },
             .clients = .{
                 .list = try std.ArrayList(*Client).initCapacity(allocator, max_connections),
                 .connected = 0,
@@ -289,8 +311,69 @@ const ServerContext = struct {
         self.callbacks.deinit();
     }
 
-    pub fn handleAccept(self: *Self, cqe: os.linux.io_uring_cqe, remote_addr: *net.Address) !void {
-        logger.debug("HANDLE ACCEPT accepting connection from {s}", .{remote_addr});
+    fn maybeAccept(self: *Self) !void {
+        if (self.listener.accept_waiting or self.clients.connected >= max_connections) return;
+
+        const sqe = try self.ring.accept(
+            @ptrToInt(&self.listener.peer_addr),
+            self.listener.server_fd,
+            &self.listener.peer_addr.any,
+            &self.listener.peer_addr_size,
+            0,
+        );
+        _ = sqe;
+
+        self.listener.accept_waiting = true;
+    }
+
+    fn submit(self: *Self) !void {
+        _ = try self.ring.submit_and_wait(1);
+    }
+
+    fn processCompletions(self: *Self) !void {
+        const cqe_count = try self.ring.copy_cqes(&self.cqes, 1);
+        assert(cqe_count > 0);
+
+        for (self.cqes[0..cqe_count]) |cqe| {
+            // CQE not associated with a client.
+
+            if (cqe.user_data <= max_int_standalone_cqe) {
+                handleStandaloneCQE(cqe);
+
+                continue;
+            }
+
+            // Accept CQE
+
+            if (cqe.user_data == @ptrToInt(&self.listener.peer_addr)) {
+                try self.onAccept(cqe, &self.listener.peer_addr);
+                self.listener.accept_waiting = false;
+
+                continue;
+            }
+
+            // CQE associated with a client and callback/
+
+            var cb = @intToPtr(*Callback, cqe.user_data);
+            defer self.callbacks.put(cb);
+
+            cb.call(self, cb.context, cqe) catch |err| {
+                switch (err) {
+                    error.UnexpectedEOF => {
+                        logger.debug("unexpected eof", .{});
+                    },
+                    else => {
+                        logger.err("unexpected error {s}", .{err});
+                    },
+                }
+
+                self.disconnectClient(cb.context);
+            };
+        }
+    }
+
+    fn onAccept(self: *Self, cqe: os.linux.io_uring_cqe, peer_addr: *net.Address) !void {
+        logger.debug("HANDLE ACCEPT accepting connection from {s}", .{peer_addr});
 
         switch (cqe.err()) {
             .SUCCESS => {},
@@ -305,7 +388,7 @@ const ServerContext = struct {
         var client = try self.root_allocator.create(Client);
         errdefer self.root_allocator.destroy(client);
 
-        try client.init(self.root_allocator, remote_addr.*, client_fd);
+        try client.init(self.root_allocator, peer_addr.*, client_fd);
         errdefer client.deinit();
 
         try self.clients.list.append(client);
@@ -376,10 +459,10 @@ const Client = struct {
     // non-null if the client was able to acquire a registered file descriptor.
     registered_fd: ?i32 = null,
 
-    pub fn init(self: *Self, allocator: mem.Allocator, remote_addr: net.Address, client_fd: os.socket_t) !void {
+    pub fn init(self: *Self, allocator: mem.Allocator, peer_addr: net.Address, client_fd: os.socket_t) !void {
         self.* = .{
             .gpa = allocator,
-            .addr = remote_addr,
+            .addr = peer_addr,
             .fd = client_fd,
             .buffer = undefined,
         };
@@ -979,77 +1062,20 @@ pub fn main() anyerror!void {
     defer ring.deinit();
 
     // Initialize server context
-    var ctx = try ServerContext.init(allocator, &ring);
+    var ctx = try ServerContext.init(allocator, &ring, server_fd);
     defer ctx.deinit();
     try ctx.registered_fds.register(&ring);
 
-    var remote_addr = net.Address{
-        .any = undefined,
-    };
-    var remote_addr_size: u32 = @sizeOf(os.sockaddr);
-
-    var accept_waiting: bool = false;
+    // For debugging
     var iteration: usize = 0;
-
-    var cqes: [max_ring_entries]io_uring_cqe = undefined;
 
     while (true) : (iteration += 1) {
         // NOTE(vincent): for debugging
         // if (iteration > 3) break;
         // std.time.sleep(300 * std.time.ns_per_ms);
 
-        if (!accept_waiting and ctx.clients.connected < max_connections) {
-            const sqe = try ring.accept(
-                @ptrToInt(&remote_addr),
-                server_fd,
-                &remote_addr.any,
-                &remote_addr_size,
-                0,
-            );
-            _ = sqe;
-            accept_waiting = true;
-        }
-
-        _ = try ring.submit_and_wait(1);
-
-        const cqe_count = try ring.copy_cqes(&cqes, 1);
-        assert(cqe_count > 0);
-
-        for (cqes[0..cqe_count]) |cqe| {
-            // CQE not associated with a client.
-
-            if (cqe.user_data <= max_int_standalone_cqe) {
-                handleStandaloneCQE(cqe);
-
-                continue;
-            }
-
-            // Accept CQE
-
-            if (cqe.user_data == @ptrToInt(&remote_addr)) {
-                try ctx.handleAccept(cqe, &remote_addr);
-                accept_waiting = false;
-
-                continue;
-            }
-
-            // CQE associated with a client and callback/
-
-            var cb = @intToPtr(*Callback, cqe.user_data);
-            defer ctx.callbacks.put(cb);
-
-            cb.call(&ctx, cb.context, cqe) catch |err| {
-                switch (err) {
-                    error.UnexpectedEOF => {
-                        logger.debug("unexpected eof", .{});
-                    },
-                    else => {
-                        logger.err("unexpected error {s}", .{err});
-                    },
-                }
-
-                ctx.disconnectClient(cb.context);
-            };
-        }
+        try ctx.maybeAccept();
+        try ctx.submit();
+        try ctx.processCompletions();
     }
 }
