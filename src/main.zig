@@ -17,6 +17,7 @@ const io_uring_sqe = std.os.linux.io_uring_sqe;
 const max_ring_entries = 512;
 const max_buffer_size = 4096;
 const max_connections = 128;
+const max_serve_threads = 8;
 
 const logger = std.log.scoped(.main);
 
@@ -255,8 +256,11 @@ const CallbackPool = struct {
 const ServerContext = struct {
     const Self = @This();
 
+    const ID = usize;
+
     root_allocator: mem.Allocator,
     ring: *IO_Uring,
+    id: ID,
 
     //
     // Listener state
@@ -285,10 +289,11 @@ const ServerContext = struct {
 
     registered_fds: RegisteredFileDescriptors,
 
-    pub fn init(allocator: mem.Allocator, ring: *IO_Uring, server_fd: os.socket_t) !Self {
+    pub fn init(allocator: mem.Allocator, ring: *IO_Uring, id: ID, server_fd: os.socket_t) !Self {
         var res = Self{
             .root_allocator = allocator,
             .ring = ring,
+            .id = id,
             .listener = .{
                 .server_fd = server_fd,
             },
@@ -373,7 +378,7 @@ const ServerContext = struct {
     }
 
     fn onAccept(self: *Self, cqe: os.linux.io_uring_cqe, peer_addr: *net.Address) !void {
-        logger.debug("HANDLE ACCEPT accepting connection from {s}", .{peer_addr});
+        logger.debug("ctx#{d:<4} HANDLE ACCEPT accepting connection from {s}", .{ self.id, peer_addr });
 
         switch (cqe.err()) {
             .SUCCESS => {},
@@ -507,7 +512,7 @@ fn onReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void 
 
     const read = @intCast(usize, cqe.res);
 
-    logger.debug("addr={s} ON READ REQUEST read of {d} bytes succeeded", .{ client.addr, read });
+    logger.debug("ctx#{d:<4} addr={s} ON READ REQUEST read of {d} bytes succeeded", .{ ctx.id, client.addr, read });
 
     const previous_len = client.buffer.items.len;
     try client.buffer.appendSlice(client.temp_buffer[0..read]);
@@ -518,7 +523,7 @@ fn onReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void 
     } else {
         // Not enough data, read more.
 
-        logger.debug("addr={s} HTTP request incomplete, submitting read", .{client.addr});
+        logger.debug("ctx#{d:<4} addr={s} HTTP request incomplete, submitting read", .{ ctx.id, client.addr });
 
         _ = try submitRead(ctx, client, client.fd, 0, onReadRequest);
     }
@@ -548,14 +553,15 @@ fn onReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
 
     const read = @intCast(usize, cqe.res);
 
-    logger.debug("addr={s} ON READ BODY read of {d} bytes succeeded", .{ client.addr, read });
+    logger.debug("ctx#{d:<4} addr={s} ON READ BODY read of {d} bytes succeeded", .{ ctx.id, client.addr, read });
 
     try client.buffer.appendSlice(client.temp_buffer[0..read]);
 
     const content_length = client.request.content_length.?;
 
     if (client.buffer.items.len < content_length) {
-        logger.debug("addr={s} buffer len={d} bytes, content length={d} bytes", .{
+        logger.debug("ctx#{d:<4} addr={s} buffer len={d} bytes, content length={d} bytes", .{
+            ctx.id,
             client.addr,
             client.buffer.items.len,
             content_length,
@@ -595,7 +601,7 @@ fn onOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !
 
     client.response.file.fd = @intCast(os.fd_t, cqe.res);
 
-    logger.debug("addr={s} HANDLE OPEN FILE fd={}", .{ client.addr, client.response.file.fd });
+    logger.debug("ctx#{d:<4} addr={s} HANDLE OPEN FILE fd={}", .{ ctx.id, client.addr, client.response.file.fd });
 
     client.temp_buffer_fba.reset();
 
@@ -1029,6 +1035,30 @@ fn handleStandaloneCQE(cqe: io_uring_cqe) void {
     }
 }
 
+const Server = struct {
+    const Self = @This();
+
+    allocator: mem.Allocator,
+
+    ring: IO_Uring,
+    ctx: ServerContext,
+
+    thread: std.Thread,
+
+    fn init(self: *Self, allocator: mem.Allocator, id: ServerContext.ID, server_fd: os.socket_t) !void {
+        self.allocator = allocator;
+
+        self.ring = try std.os.linux.IO_Uring.init(max_ring_entries, 0);
+
+        self.ctx = try ServerContext.init(allocator, &self.ring, id, server_fd);
+        try self.ctx.registered_fds.register(&self.ring);
+    }
+
+    fn deinit(self: *Self) void {
+        self.ring.deinit();
+    }
+};
+
 pub fn main() anyerror!void {
     var gpa = heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit()) {
@@ -1051,32 +1081,45 @@ pub fn main() anyerror!void {
     };
     os.sigaction(os.SIG.PIPE, &act, null);
 
-    // Create the server
+    // Create the server socket
     const server_fd = try createServer(3405);
 
     logger.info("listening on :3405\n", .{});
 
-    // Create the ring
-    // var cqes: [max_ring_entries]io_uring_cqe = undefined;
+    // Create the servers
 
-    var ring = try std.os.linux.IO_Uring.init(max_ring_entries, 0);
-    defer ring.deinit();
-
-    // Initialize server context
-    var ctx = try ServerContext.init(allocator, &ring, server_fd);
-    defer ctx.deinit();
-    try ctx.registered_fds.register(&ring);
-
-    // For debugging
-    var iteration: usize = 0;
-
-    while (true) : (iteration += 1) {
-        // NOTE(vincent): for debugging
-        // if (iteration > 3) break;
-        // std.time.sleep(300 * std.time.ns_per_ms);
-
-        try ctx.maybeAccept();
-        try ctx.submit();
-        try ctx.processCompletions();
+    var servers = try allocator.alloc(Server, max_serve_threads);
+    for (servers) |*server, i| {
+        try server.init(allocator, i, server_fd);
     }
+    defer {
+        for (servers) |*server| server.deinit();
+        allocator.free(servers);
+    }
+
+    for (servers) |*v| {
+        v.thread = try std.Thread.spawn(
+            .{},
+            struct {
+                fn worker(server: *Server) !void {
+
+                    // For debugging
+                    var iteration: usize = 0;
+
+                    while (true) : (iteration += 1) {
+                        // NOTE(vincent): for debugging
+                        // if (iteration > 3) break;
+                        // std.time.sleep(300 * std.time.ns_per_ms);
+
+                        try server.ctx.maybeAccept();
+                        try server.ctx.submit();
+                        try server.ctx.processCompletions();
+                    }
+                }
+            }.worker,
+            .{v},
+        );
+    }
+
+    for (servers) |*v| v.thread.join();
 }
