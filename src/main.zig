@@ -605,16 +605,6 @@ fn onOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !
     // if (client.registered_fd != null) {
     //     try ctx.registered_fds.update(ctx.ring);
     // }
-
-    try submitStatxFile(
-        ctx,
-        client,
-        client.response.file.fd,
-        os.linux.AT.EMPTY_PATH,
-        os.linux.STATX_SIZE,
-        &client.response.file.statx_buf,
-        onStatxResponseFile,
-    );
 }
 
 fn onStatxResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
@@ -884,7 +874,7 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
 
         client.buffer.clearRetainingCapacity();
 
-        try submitOpenFile(
+        var sqe = try submitOpenFile(
             ctx,
             client,
             client.response.file.path,
@@ -892,6 +882,18 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
             0644,
             onOpenResponseFile,
         );
+        sqe.flags |= os.linux.IOSQE_IO_LINK;
+
+        try submitStatxFile(
+            ctx,
+            client,
+            client.response.file.path,
+            os.linux.AT.SYMLINK_NOFOLLOW,
+            os.linux.STATX_SIZE,
+            &client.response.file.statx_buf,
+            onStatxResponseFile,
+        );
+
         return;
     }
 
@@ -962,7 +964,7 @@ fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.fd_t, offset: u64, c
     _ = sqe;
 }
 
-fn submitOpenFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flags: u32, mode: os.mode_t, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) !void {
+fn submitOpenFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flags: u32, mode: os.mode_t, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) !*io_uring_sqe {
     logger.debug("addr={s} submitting open, path=\"{s}\"", .{
         client.addr,
         fmt.fmtSliceEscapeLower(path),
@@ -974,20 +976,19 @@ fn submitOpenFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flag
         .call = cb,
     };
 
-    var sqe = try ctx.ring.openat(
+    return try ctx.ring.openat(
         @ptrToInt(tmp),
         os.linux.AT.FDCWD,
         path,
         flags,
         mode,
     );
-    _ = sqe;
 }
 
-fn submitStatxFile(ctx: *ServerContext, client: *Client, fd: os.fd_t, flags: u32, mask: u32, buf: *os.linux.Statx, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) !void {
-    logger.debug("addr={s} submitting statx, fd={d}", .{
+fn submitStatxFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flags: u32, mask: u32, buf: *os.linux.Statx, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) !void {
+    logger.debug("addr={s} submitting statx, path=\"{s}\"", .{
         client.addr,
-        fd,
+        fmt.fmtSliceEscapeLower(path),
     });
 
     var tmp = ctx.callbacks.get() orelse return error.OutOfCallback;
@@ -998,8 +999,8 @@ fn submitStatxFile(ctx: *ServerContext, client: *Client, fd: os.fd_t, flags: u32
 
     var sqe = try ctx.ring.statx(
         @ptrToInt(tmp),
-        fd,
-        "",
+        os.linux.AT.FDCWD,
+        path,
         flags,
         mask,
         buf,
