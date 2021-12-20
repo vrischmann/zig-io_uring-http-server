@@ -283,7 +283,6 @@ const ServerContext = struct {
 
     clients: struct {
         list: std.ArrayList(*Client),
-        connected: usize,
     },
     callbacks: CallbackPool,
 
@@ -299,7 +298,6 @@ const ServerContext = struct {
             },
             .clients = .{
                 .list = try std.ArrayList(*Client).initCapacity(allocator, max_connections),
-                .connected = 0,
             },
             .callbacks = try CallbackPool.init(allocator),
             .registered_fds = .{},
@@ -317,7 +315,7 @@ const ServerContext = struct {
     }
 
     fn maybeAccept(self: *Self) !void {
-        if (self.listener.accept_waiting or self.clients.connected >= max_connections) return;
+        if (self.listener.accept_waiting or self.clients.list.items.len >= max_connections) return;
 
         const sqe = try self.ring.accept(
             @ptrToInt(&self.listener.peer_addr),
