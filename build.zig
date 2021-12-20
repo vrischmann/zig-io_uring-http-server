@@ -20,19 +20,14 @@ pub fn build(b: *std.build.Builder) void {
     picohttp.setBuildMode(mode);
     picohttp.linkLibC();
 
-    const exe = b.addExecutable("zig-io_uring-test", "src/main.zig");
+    const exe = b.addExecutable("httpserver", "src/main.zig");
     exe.addIncludeDir("src");
     exe.setTarget(target);
     exe.setBuildMode(mode);
     exe.linkLibrary(picohttp);
     exe.install();
 
-    const run_cmd = exe.run();
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
+    const tests = b.addTest("src/test.zig");
+    const test_step = b.step("test", "Run library tests");
+    test_step.dependOn(&tests.step);
 }
