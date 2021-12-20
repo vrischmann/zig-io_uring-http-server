@@ -276,16 +276,7 @@ const ServerContext = struct {
             switch (cb.kind) {
                 .client => |client_cb| {
                     client_cb.call(self, client_cb.context, cqe) catch |err| {
-                        switch (err) {
-                            error.UnexpectedEOF => {
-                                logger.debug("ctx#{d:<4} unexpected eof", .{self.id});
-                            },
-                            else => {
-                                logger.err("ctx#{d:<4} unexpected error {s}", .{ self.id, err });
-                            },
-                        }
-
-                        _ = self.submitClose(client_cb.context, client_cb.context.fd, onCloseClient) catch {};
+                        self.handleClientCallbackError(client_cb.context, err);
                     };
                 },
                 .standalone => |standalone_cb| {
@@ -295,6 +286,26 @@ const ServerContext = struct {
                 },
             }
         }
+    }
+
+    fn handleClientCallbackError(self: *Self, client: *Client, err: anyerror) void {
+        // This is the only error that doesn't trigger a close of the socket (for now).
+        // Handle it separately to avoid code repetition.
+        if (err == error.Canceled) return;
+
+        switch (err) {
+            error.ConnectionResetByPeer => {
+                logger.info("ctx#{d:<4} client fd={d} disconnected", .{ self.id, client.fd });
+            },
+            error.UnexpectedEOF => {
+                logger.debug("ctx#{d:<4} unexpected eof", .{self.id});
+            },
+            else => {
+                logger.err("ctx#{d:<4} unexpected error {s}", .{ self.id, err });
+            },
+        }
+
+        _ = self.submitClose(client, client.fd, onCloseClient) catch {};
     }
 
     fn submitAccept(self: *Self) !*io_uring_sqe {
@@ -620,19 +631,22 @@ fn onOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !
 }
 
 fn onStatxResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
-    debug.assert(client.buffer.items.len == 0);
-
     _ = ctx;
 
     switch (cqe.err()) {
-        .SUCCESS => {},
+        .SUCCESS => {
+            debug.assert(client.buffer.items.len == 0);
+        },
+        .CANCELED => {
+            return error.Canceled;
+        },
         else => |err| {
-            logger.err("ctx#{d:<4} addr={s} unexpected errno={}", .{ ctx.id, client.addr, err });
+            logger.err("ctx#{d:<4} addr={s} ON STATX RESPONSE FILE unexpected errno={}", .{ ctx.id, client.addr, err });
             return error.Unexpected;
         },
     }
 
-    logger.debug("ctx#{d:<4} addr={s} HANDLE STATX FILE path=\"{s}\" fd={}, size={s}", .{
+    logger.debug("ctx#{d:<4} addr={s} ON STATX RESPONSE FILE path=\"{s}\" fd={}, size={s}", .{
         ctx.id,
         client.addr,
         client.response.file.path,
