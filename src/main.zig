@@ -201,10 +201,38 @@ const RegisteredFileDescriptors = struct {
 };
 
 const Callback = struct {
-    context: *Client,
-    call: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void,
+    kind: union(enum) {
+        client: struct {
+            context: *Client,
+            call: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void,
+        },
+        standalone: struct {
+            call: fn (*ServerContext, io_uring_cqe) anyerror!void,
+        },
+    },
 
     next: ?*Callback = null,
+
+    pub fn initStandalone(self: *Callback, cb: fn (*ServerContext, io_uring_cqe) anyerror!void) void {
+        self.* = .{
+            .kind = .{
+                .standalone = .{
+                    .call = cb,
+                },
+            },
+        };
+    }
+
+    pub fn initClient(self: *Callback, client: *Client, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) void {
+        self.* = .{
+            .kind = .{
+                .client = .{
+                    .context = client,
+                    .call = cb,
+                },
+            },
+        };
+    }
 };
 
 const CallbackPool = struct {
@@ -223,8 +251,7 @@ const CallbackPool = struct {
         while (i < max_connections * 32) : (i += 1) {
             const callback = try allocator.create(Callback);
             callback.* = .{
-                .context = undefined,
-                .call = undefined,
+                .kind = undefined,
                 .next = res.free_list,
             };
             res.free_list = callback;
@@ -247,7 +274,7 @@ const CallbackPool = struct {
     }
 
     pub fn put(self: *Self, callback: *Callback) void {
-        callback.call = undefined;
+        callback.kind = undefined;
         callback.next = self.free_list;
         self.free_list = callback;
     }
@@ -315,17 +342,11 @@ const ServerContext = struct {
     }
 
     fn maybeAccept(self: *Self) !void {
-        if (self.listener.accept_waiting or self.clients.list.items.len >= max_connections) return;
+        if (self.listener.accept_waiting or self.clients.list.items.len >= max_connections) {
+            return;
+        }
 
-        const sqe = try self.ring.accept(
-            @ptrToInt(&self.listener.peer_addr),
-            self.listener.server_fd,
-            &self.listener.peer_addr.any,
-            &self.listener.peer_addr_size,
-            0,
-        );
-        _ = sqe;
-
+        _ = try self.submitAccept();
         self.listener.accept_waiting = true;
     }
 
@@ -338,50 +359,91 @@ const ServerContext = struct {
         assert(cqe_count > 0);
 
         for (self.cqes[0..cqe_count]) |cqe| {
-            // CQE not associated with a client.
-
-            if (cqe.user_data <= max_int_standalone_cqe) {
-                handleStandaloneCQE(cqe);
-
-                continue;
-            }
-
-            // Accept CQE
-
-            if (cqe.user_data == @ptrToInt(&self.listener.peer_addr)) {
-                try self.onAccept(cqe, &self.listener.peer_addr);
-                self.listener.accept_waiting = false;
-
-                continue;
-            }
-
-            // CQE associated with a client and callback/
+            debug.assert(cqe.user_data != 0);
 
             var cb = @intToPtr(*Callback, cqe.user_data);
             defer self.callbacks.put(cb);
 
-            cb.call(self, cb.context, cqe) catch |err| {
-                switch (err) {
-                    error.UnexpectedEOF => {
-                        logger.debug("unexpected eof", .{});
-                    },
-                    else => {
-                        logger.err("unexpected error {s}", .{err});
-                    },
-                }
+            switch (cb.kind) {
+                .client => |client_cb| {
+                    client_cb.call(self, client_cb.context, cqe) catch |err| {
+                        switch (err) {
+                            error.UnexpectedEOF => {
+                                logger.debug("ctx#{d:<4} unexpected eof", .{self.id});
+                            },
+                            else => {
+                                logger.err("ctx#{d:<4} unexpected error {s}", .{ self.id, err });
+                            },
+                        }
 
-                self.disconnectClient(cb.context);
-            };
+                        _ = self.submitClose(client_cb.context, client_cb.context.fd, onCloseClient) catch {};
+                    };
+                },
+                .standalone => |standalone_cb| {
+                    standalone_cb.call(self, cqe) catch |err| {
+                        logger.err("ctx#{d:<4} unexpected error {s}", .{ self.id, err });
+                    };
+                },
+            }
         }
     }
 
-    fn onAccept(self: *Self, cqe: os.linux.io_uring_cqe, peer_addr: *net.Address) !void {
-        logger.debug("ctx#{d:<4} HANDLE ACCEPT accepting connection from {s}", .{ self.id, peer_addr });
+    fn submitAccept(self: *Self) !*io_uring_sqe {
+        logger.debug("ctx#{d:<4} submitting accept on {d}", .{
+            self.id,
+            self.listener.server_fd,
+        });
+
+        var tmp = self.callbacks.get() orelse return error.OutOfCallback;
+        tmp.initStandalone(onAccept);
+
+        return try self.ring.accept(
+            @ptrToInt(tmp),
+            self.listener.server_fd,
+            &self.listener.peer_addr.any,
+            &self.listener.peer_addr_size,
+            0,
+        );
+    }
+
+    fn submitStandaloneClose(self: *ServerContext, fd: os.fd_t, cb: fn (*ServerContext, io_uring_cqe) anyerror!void) !*io_uring_sqe {
+        logger.debug("ctx#{d:<4} submitting close of {d}", .{
+            self.id,
+            fd,
+        });
+
+        var tmp = self.callbacks.get() orelse return error.OutOfCallback;
+        tmp.initStandalone(cb);
+
+        return self.ring.close(
+            @ptrToInt(tmp),
+            fd,
+        );
+    }
+
+    fn submitClose(self: *ServerContext, client: *Client, fd: os.fd_t, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) !*io_uring_sqe {
+        logger.debug("ctx#{d:<4} addr={s} submitting close of {d}", .{
+            self.id,
+            client.addr,
+            fd,
+        });
+
+        var tmp = self.callbacks.get() orelse return error.OutOfCallback;
+        tmp.initClient(client, cb);
+
+        return self.ring.close(
+            @ptrToInt(tmp),
+            fd,
+        );
+    }
+
+    fn onAccept(self: *Self, cqe: os.linux.io_uring_cqe) !void {
+        logger.debug("ctx#{d:<4} HANDLE ACCEPT accepting connection from {s}", .{ self.id, self.listener.peer_addr });
 
         switch (cqe.err()) {
             .SUCCESS => {},
             else => |err| {
-                logger.err("unexpected errno={}", .{err});
+                logger.err("ctx#{d:<4} unexpected errno={}", .{ self.id, err });
                 return error.Unexpected;
             },
         }
@@ -391,20 +453,56 @@ const ServerContext = struct {
         var client = try self.root_allocator.create(Client);
         errdefer self.root_allocator.destroy(client);
 
-        try client.init(self.root_allocator, peer_addr.*, client_fd);
+        try client.init(self.root_allocator, self.listener.peer_addr, client_fd);
         errdefer client.deinit();
 
         try self.clients.list.append(client);
 
+        self.listener.accept_waiting = false;
+
         _ = try submitRead(self, client, client_fd, 0, onReadRequest);
     }
 
-    pub fn disconnectClient(self: *Self, client: *Client) void {
-        _ = self.ring.close(0, client.fd) catch {};
+    fn onCloseClient(self: *Self, client: *Client, cqe: os.linux.io_uring_cqe) !void {
+        logger.debug("ctx#{d:<4} addr={s} HANDLE CLOSE CLIENT fd={}", .{
+            self.id,
+            client.addr,
+            client.fd,
+        });
 
         // Cleanup resources
         releaseRegisteredFileDescriptor(self, client);
         client.deinit();
+
+        // Remove client from list
+        const maybe_pos: ?usize = for (self.clients.list.items) |item, i| {
+            if (item == client) {
+                break i;
+            }
+        } else blk: {
+            break :blk null;
+        };
+        if (maybe_pos) |pos| _ = self.clients.list.orderedRemove(pos);
+
+        switch (cqe.err()) {
+            .SUCCESS => {},
+            else => |err| {
+                logger.err("ctx#{d:<4} unexpected errno={}", .{ self.id, err });
+                return error.Unexpected;
+            },
+        }
+    }
+
+    fn onClose(self: *Self, cqe: os.linux.io_uring_cqe) !void {
+        logger.debug("ctx#{d:<4} HANDLE CLOSE", .{self.id});
+
+        switch (cqe.err()) {
+            .SUCCESS => {},
+            else => |err| {
+                logger.err("ctx#{d:<4} unexpected errno={}", .{ self.id, err });
+                return error.Unexpected;
+            },
+        }
     }
 };
 
@@ -412,7 +510,7 @@ fn releaseRegisteredFileDescriptor(ctx: *ServerContext, client: *Client) void {
     if (client.registered_fd) |registered_fd| {
         ctx.registered_fds.release(registered_fd);
         ctx.registered_fds.update(ctx.ring) catch |err| {
-            logger.err("unable to update registered file descriptors, err={}", .{err});
+            logger.err("ctx#{d:<4} unable to update registered file descriptors, err={}", .{ ctx.id, err });
         };
         client.registered_fd = null;
     }
@@ -492,15 +590,15 @@ fn onReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void 
     switch (cqe.err()) {
         .SUCCESS => {},
         .PIPE => {
-            logger.err("addr={s} broken pipe", .{client.addr});
+            logger.err("ctx#{d:<4} addr={s} broken pipe", .{ ctx.id, client.addr });
             return error.BrokenPipe;
         },
         .CONNRESET => {
-            logger.debug("addr={s} connection reset by peer", .{client.addr});
+            logger.debug("ctx#{d:<4} addr={s} connection reset by peer", .{ ctx.id, client.addr });
             return error.ConnectionResetByPeer;
         },
         else => |err| {
-            logger.err("addr={s} unexpected errno={}", .{ client.addr, err });
+            logger.err("ctx#{d:<4} addr={s} unexpected errno={}", .{ ctx.id, client.addr, err });
             return error.Unexpected;
         },
     }
@@ -533,15 +631,15 @@ fn onReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
     switch (cqe.err()) {
         .SUCCESS => {},
         .PIPE => {
-            logger.err("addr={s} broken pipe", .{client.addr});
+            logger.err("ctx#{d:<4} addr={s} broken pipe", .{ ctx.id, client.addr });
             return error.BrokenPipe;
         },
         .CONNRESET => {
-            logger.err("addr={s} connection reset by peer", .{client.addr});
+            logger.err("ctx#{d:<4} addr={s} connection reset by peer", .{ ctx.id, client.addr });
             return error.ConnectionResetByPeer;
         },
         else => |err| {
-            logger.err("addr={s} unexpected errno={}", .{ client.addr, err });
+            logger.err("ctx#{d:<4} addr={s} unexpected errno={}", .{ ctx.id, client.addr, err });
             return error.Unexpected;
         },
     }
@@ -583,7 +681,8 @@ fn onOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !
         .NOENT => {
             client.temp_buffer_fba.reset();
 
-            logger.err("addr={s} no such file or directory, path=\"{s}\"", .{
+            logger.err("ctx#{d:<4} addr={s} no such file or directory, path=\"{s}\"", .{
+                ctx.id,
                 client.addr,
                 fmt.fmtSliceEscapeLower(client.response.file.path),
             });
@@ -592,7 +691,7 @@ fn onOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !
             return;
         },
         else => |err| {
-            logger.err("addr={s} unexpected errno={}", .{ client.addr, err });
+            logger.err("ctx#{d:<4} addr={s} unexpected errno={}", .{ ctx.id, client.addr, err });
             return error.Unexpected;
         },
     }
@@ -619,12 +718,13 @@ fn onStatxResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) 
     switch (cqe.err()) {
         .SUCCESS => {},
         else => |err| {
-            logger.err("addr={s} unexpected errno={}", .{ client.addr, err });
+            logger.err("ctx#{d:<4} addr={s} unexpected errno={}", .{ ctx.id, client.addr, err });
             return error.Unexpected;
         },
     }
 
-    logger.debug("addr={s} HANDLE STATX FILE path=\"{s}\" fd={}, size={s}", .{
+    logger.debug("ctx#{d:<4} addr={s} HANDLE STATX FILE path=\"{s}\" fd={}, size={s}", .{
+        ctx.id,
         client.addr,
         client.response.file.path,
         client.response.file.fd,
@@ -662,7 +762,7 @@ fn onReadResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !
     switch (cqe.err()) {
         .SUCCESS => {},
         else => |err| {
-            logger.err("addr={s} HANDLE READ RESPONSE FILE unexpected errno={}", .{ client.addr, err });
+            logger.err("ctx#{d:<4} addr={s} HANDLE READ RESPONSE FILE unexpected errno={}", .{ ctx.id, client.addr, err });
             return error.Unexpected;
         },
     }
@@ -672,7 +772,8 @@ fn onReadResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !
 
     const read = @intCast(usize, cqe.res);
 
-    logger.debug("addr={s} HANDLE READ RESPONSE FILE read of {d} bytes from {d} succeeded", .{
+    logger.debug("ctx#{d:<4} addr={s} HANDLE READ RESPONSE FILE read of {d} bytes from {d} succeeded", .{
+        ctx.id,
         client.addr,
         read,
         client.response.file.fd,
@@ -689,7 +790,7 @@ fn onWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) 
     switch (cqe.err()) {
         .SUCCESS => {},
         else => |err| {
-            logger.err("addr={s} HANDLE WRITE RESPONSE FILE unexpected errno={}", .{ client.addr, err });
+            logger.err("ctx#{d:<4} addr={s} HANDLE WRITE RESPONSE FILE unexpected errno={}", .{ ctx.id, client.addr, err });
             return error.Unexpected;
         },
     }
@@ -699,7 +800,8 @@ fn onWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) 
 
     const written = @intCast(usize, cqe.res);
 
-    logger.debug("addr={s} HANDLE WRITE RESPONSE FILE write of {d} bytes to {d} succeeded", .{
+    logger.debug("ctx#{d:<4} addr={s} HANDLE WRITE RESPONSE FILE write of {d} bytes to {d} succeeded", .{
+        ctx.id,
         client.addr,
         written,
         client.fd,
@@ -731,7 +833,8 @@ fn onWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) 
         return;
     }
 
-    logger.debug("addr={s} HANDLE WRITE RESPONSE FILE done", .{
+    logger.debug("ctx#{d:<4} addr={s} HANDLE WRITE RESPONSE FILE done", .{
+        ctx.id,
         client.addr,
     });
 
@@ -739,7 +842,7 @@ fn onWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) 
 
     releaseRegisteredFileDescriptor(ctx, client);
     // Close the response file descriptor
-    try submitClose(ctx, client, client.response.file.fd);
+    _ = try ctx.submitClose(client, client.response.file.fd, onCloseResponseFile);
     client.response.file.fd = -1;
 
     // Reset the client state
@@ -750,19 +853,35 @@ fn onWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) 
     _ = try submitRead(ctx, client, client.fd, 0, onReadRequest);
 }
 
+fn onCloseResponseFile(ctx: *ServerContext, client: *Client, cqe: os.linux.io_uring_cqe) !void {
+    logger.debug("ctx#{d:<4} addr={s} HANDLE CLOSE RESPONSE FILE fd={}", .{
+        ctx.id,
+        client.addr,
+        client.response.file.fd,
+    });
+
+    switch (cqe.err()) {
+        .SUCCESS => {},
+        else => |err| {
+            logger.err("ctx#{d:<4} unexpected errno={}", .{ ctx.id, err });
+            return error.Unexpected;
+        },
+    }
+}
+
 fn onWriteResponseBuffer(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
     switch (cqe.err()) {
         .SUCCESS => {},
         .PIPE => {
-            logger.err("addr={s} broken pipe", .{client.addr});
+            logger.err("ctx#{d:<4} addr={s} broken pipe", .{ ctx.id, client.addr });
             return error.BrokenPipe;
         },
         .CONNRESET => {
-            logger.err("addr={s} connection reset by peer", .{client.addr});
+            logger.err("ctx#{d:<4} addr={s} connection reset by peer", .{ ctx.id, client.addr });
             return error.ConnectionResetByPeer;
         },
         else => |err| {
-            logger.err("addr={s} unexpected errno={}", .{ client.addr, err });
+            logger.err("ctx#{d:<4} addr={s} unexpected errno={}", .{ ctx.id, client.addr, err });
             return error.Unexpected;
         },
     }
@@ -779,7 +898,10 @@ fn onWriteResponseBuffer(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe
         return;
     }
 
-    logger.debug("HANDLE WRITE RESPONSE done", .{});
+    logger.debug("ctx#{d:<4} addr={s} HANDLE WRITE RESPONSE done", .{
+        ctx.id,
+        client.addr,
+    });
 
     // Response written, read the next request
     client.request = .{};
@@ -791,7 +913,8 @@ fn onWriteResponseBuffer(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe
 fn submitWriteNotFound(ctx: *ServerContext, client: *Client) !void {
     _ = ctx;
 
-    logger.debug("addr={s} returning 404 Not Found", .{
+    logger.debug("ctx#{d:<4} addr={s} returning 404 Not Found", .{
+        ctx.id,
         client.addr,
     });
 
@@ -805,7 +928,8 @@ fn submitWriteNotFound(ctx: *ServerContext, client: *Client) !void {
 fn processRequestWithBody(ctx: *ServerContext, client: *Client) !void {
     _ = ctx;
 
-    logger.debug("addr={s} body data=\"{s}\" size={s}", .{
+    logger.debug("ctx#{d:<4} addr={s} body data=\"{s}\" size={s}", .{
+        ctx.id,
         client.addr,
         fmt.fmtSliceEscapeLower(client.buffer.items),
         fmt.fmtIntSizeBin(@intCast(u64, client.buffer.items.len)),
@@ -823,9 +947,10 @@ fn processRequestWithBody(ctx: *ServerContext, client: *Client) !void {
 fn processRequest(ctx: *ServerContext, client: *Client) !void {
     const req = client.request.result.req;
 
-    logger.debug("addr={s} parsed HTTP request", .{client.addr});
+    logger.debug("ctx#{d:<4} addr={s} parsed HTTP request", .{ ctx.id, client.addr });
 
-    logger.debug("addr={s} method: {s}, path: {s}, minor version: {d}", .{
+    logger.debug("ctx#{d:<4} addr={s} method: {s}, path: {s}, minor version: {d}", .{
+        ctx.id,
         client.addr,
         req.getMethod(),
         req.getPath(),
@@ -843,14 +968,15 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
         }.do,
     );
 
-    logger.debug("addr={s} content length: {d}", .{ client.addr, content_length });
+    logger.debug("ctx#{d:<4} addr={s} content length: {d}", .{ ctx.id, client.addr, content_length });
 
     // If there's a content length we switch to reading the body.
     if (content_length) |n| {
         try client.buffer.replaceRange(0, client.request.result.consumed, &[0]u8{});
 
         if (n > client.buffer.items.len) {
-            logger.debug("addr={s} body incomplete, usable={d} bytes, body data=\"{s}\", content length: {d} bytes", .{
+            logger.debug("ctx#{d:<4} addr={s} body incomplete, usable={d} bytes, body data=\"{s}\", content length: {d} bytes", .{
+                ctx.id,
                 client.addr,
                 client.buffer.items.len,
                 fmt.fmtSliceEscapeLower(client.buffer.items),
@@ -901,8 +1027,6 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
         return;
     }
 
-    logger.debug("path: {s}", .{client.request.result.req.getPath()});
-
     // TODO(vincent): actually do something
 
     const static_response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
@@ -912,29 +1036,16 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
     try submitWrite(ctx, client, client.fd, 0, onWriteResponseBuffer);
 }
 
-fn submitClose(ctx: *ServerContext, client: *Client, fd: os.fd_t) !void {
-    logger.debug("addr={s} submitting close of {d}", .{
-        client.addr,
-        fd,
-    });
-
-    // NOTE(vincent): should we also handle close CQEs ?
-    var sqe = try ctx.ring.close(0, fd);
-    _ = sqe;
-}
-
 fn submitRead(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u64, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) !*io_uring_sqe {
-    logger.debug("addr={s} submitting read from {d}, offset {d}", .{
+    logger.debug("ctx#{d:<4} addr={s} submitting read from {d}, offset {d}", .{
+        ctx.id,
         client.addr,
         fd,
         offset,
     });
 
     var tmp = ctx.callbacks.get() orelse return error.OutOfCallback;
-    tmp.* = .{
-        .context = client,
-        .call = cb,
-    };
+    tmp.initClient(client, cb);
 
     return ctx.ring.read(
         @ptrToInt(tmp),
@@ -945,7 +1056,8 @@ fn submitRead(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u64
 }
 
 fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.fd_t, offset: u64, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) !void {
-    logger.debug("addr={s} submitting write of {s} to {d}, offset {d}, data=\"{s}\"", .{
+    logger.debug("ctx#{d:<4} addr={s} submitting write of {s} to {d}, offset {d}, data=\"{s}\"", .{
+        ctx.id,
         client.addr,
         fmt.fmtIntSizeBin(client.buffer.items.len),
         fd,
@@ -954,10 +1066,7 @@ fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.fd_t, offset: u64, c
     });
 
     var tmp = ctx.callbacks.get() orelse return error.OutOfCallback;
-    tmp.* = .{
-        .context = client,
-        .call = cb,
-    };
+    tmp.initClient(client, cb);
 
     var sqe = try ctx.ring.write(
         @ptrToInt(tmp),
@@ -969,16 +1078,14 @@ fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.fd_t, offset: u64, c
 }
 
 fn submitOpenFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flags: u32, mode: os.mode_t, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) !*io_uring_sqe {
-    logger.debug("addr={s} submitting open, path=\"{s}\"", .{
+    logger.debug("ctx#{d:<4} addr={s} submitting open, path=\"{s}\"", .{
+        ctx.id,
         client.addr,
         fmt.fmtSliceEscapeLower(path),
     });
 
     var tmp = ctx.callbacks.get() orelse return error.OutOfCallback;
-    tmp.* = .{
-        .context = client,
-        .call = cb,
-    };
+    tmp.initClient(client, cb);
 
     return try ctx.ring.openat(
         @ptrToInt(tmp),
@@ -990,16 +1097,14 @@ fn submitOpenFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flag
 }
 
 fn submitStatxFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flags: u32, mask: u32, buf: *os.linux.Statx, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) !void {
-    logger.debug("addr={s} submitting statx, path=\"{s}\"", .{
+    logger.debug("ctx#{d:<4} addr={s} submitting statx, path=\"{s}\"", .{
+        ctx.id,
         client.addr,
         fmt.fmtSliceEscapeLower(path),
     });
 
     var tmp = ctx.callbacks.get() orelse return error.OutOfCallback;
-    tmp.* = .{
-        .context = client,
-        .call = cb,
-    };
+    tmp.initClient(client, cb);
 
     var sqe = try ctx.ring.statx(
         @ptrToInt(tmp),
@@ -1010,27 +1115,6 @@ fn submitStatxFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, fla
         buf,
     );
     _ = sqe;
-}
-
-const StandaloneCQE = enum {
-    close,
-};
-const max_int_standalone_cqe = @enumToInt(StandaloneCQE.close);
-
-fn handleStandaloneCQE(cqe: io_uring_cqe) void {
-    const typ = @intToEnum(StandaloneCQE, cqe.user_data);
-    switch (typ) {
-        .close => {
-            switch (cqe.err()) {
-                .SUCCESS => {
-                    logger.debug("closed file descriptor", .{});
-                },
-                else => |err| {
-                    logger.err("unable to close file descriptor, unexpected errno={}", .{err});
-                },
-            }
-        },
-    }
 }
 
 const Server = struct {
