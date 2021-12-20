@@ -28,6 +28,12 @@ pub fn build(b: *std.build.Builder) void {
     exe.install();
 
     const tests = b.addTest("src/test.zig");
+    tests.addIncludeDir("src");
+    tests.setTarget(target);
+    tests.setBuildMode(mode);
+    tests.linkSystemLibrary("curl");
+    tests.linkLibrary(picohttp);
+
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&tests.step);
 }
