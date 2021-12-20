@@ -274,7 +274,7 @@ const ServerContext = struct {
     }
 
     fn submit(self: *Self) !void {
-        _ = try self.ring.submit();
+        _ = try self.ring.submit_and_wait(1);
     }
 
     fn processCompletions(self: *Self) !void {
