@@ -19,6 +19,7 @@ const http = @import("http.zig");
 const max_ring_entries = 512;
 const max_buffer_size = 4096;
 const max_connections = 128;
+const max_accept_timeout = 30 * time.ns_per_s;
 const max_serve_threads = 8;
 
 const logger = std.log.scoped(.main);
@@ -206,6 +207,10 @@ const ServerContext = struct {
         server_fd: os.socket_t,
 
         accept_waiting: bool = false,
+        timeout: os.linux.kernel_timespec = .{
+            .tv_sec = 0,
+            .tv_nsec = 0,
+        },
 
         // Next peer we're accepting
         peer_addr: net.Address = net.Address{
@@ -250,17 +255,26 @@ const ServerContext = struct {
         self.callbacks.deinit();
     }
 
-    fn maybeAccept(self: *Self) !void {
+    fn maybeAccept(self: *Self, timeout: u63) !void {
         if (self.listener.accept_waiting or self.clients.list.items.len >= max_connections) {
             return;
         }
 
-        _ = try self.submitAccept();
+        // Queue an accept and link it to a timeout.
+
+        var sqe = try self.submitAccept();
+        sqe.flags |= os.linux.IOSQE_IO_LINK;
+
+        self.listener.timeout.tv_sec = 0;
+        self.listener.timeout.tv_nsec = timeout;
+
+        _ = try self.submitAcceptLinkTimeout();
+
         self.listener.accept_waiting = true;
     }
 
     fn submit(self: *Self) !void {
-        _ = try self.ring.submit_and_wait(1);
+        _ = try self.ring.submit();
     }
 
     fn processCompletions(self: *Self) !void {
@@ -326,6 +340,19 @@ const ServerContext = struct {
         );
     }
 
+    fn submitAcceptLinkTimeout(self: *Self) !*io_uring_sqe {
+        logger.debug("ctx#{d:<4} submitting link timeout", .{self.id});
+
+        var tmp = self.callbacks.get() orelse return error.OutOfCallback;
+        tmp.initStandalone(onAcceptLinkTimeout);
+
+        return self.ring.link_timeout(
+            @ptrToInt(tmp),
+            &self.listener.timeout,
+            0,
+        );
+    }
+
     fn submitStandaloneClose(self: *ServerContext, fd: os.fd_t, cb: fn (*ServerContext, io_uring_cqe) anyerror!void) !*io_uring_sqe {
         logger.debug("ctx#{d:<4} submitting close of {d}", .{
             self.id,
@@ -358,15 +385,21 @@ const ServerContext = struct {
     }
 
     fn onAccept(self: *Self, cqe: os.linux.io_uring_cqe) !void {
-        logger.debug("ctx#{d:<4} HANDLE ACCEPT accepting connection from {s}", .{ self.id, self.listener.peer_addr });
+        defer self.listener.accept_waiting = false;
 
         switch (cqe.err()) {
             .SUCCESS => {},
+            .CANCELED => {
+                logger.debug("ctx#{d:<4} ON ACCEPT timedout", .{self.id});
+                return error.Canceled;
+            },
             else => |err| {
-                logger.err("ctx#{d:<4} unexpected errno={}", .{ self.id, err });
+                logger.err("ctx#{d:<4} ON ACCEPT unexpected errno={}", .{ self.id, err });
                 return error.Unexpected;
             },
         }
+
+        logger.debug("ctx#{d:<4} ON ACCEPT accepting connection from {s}", .{ self.id, self.listener.peer_addr });
 
         const client_fd = @intCast(os.socket_t, cqe.res);
 
@@ -378,9 +411,22 @@ const ServerContext = struct {
 
         try self.clients.list.append(client);
 
-        self.listener.accept_waiting = false;
-
         _ = try submitRead(self, client, client_fd, 0, onReadRequest);
+    }
+
+    fn onAcceptLinkTimeout(self: *Self, cqe: os.linux.io_uring_cqe) !void {
+        switch (cqe.err()) {
+            .CANCELED => {
+                logger.debug("ctx#{d:<4} ON LINK TIMEOUT operation finished before timeout", .{self.id});
+            },
+            .TIME => {
+                logger.debug("ctx#{d:<4} ON LINK TIMEOUT timeout finished before accept", .{self.id});
+            },
+            else => |err| {
+                logger.err("ctx#{d:<4} ON LINK TIMEOUT unexpected errno={}", .{ self.id, err });
+                return error.Unexpected;
+            },
+        }
     }
 
     fn onCloseClient(self: *Self, client: *Client, cqe: os.linux.io_uring_cqe) !void {
@@ -1116,7 +1162,7 @@ pub fn main() anyerror!void {
                         // if (iteration > 3) break;
                         // std.time.sleep(300 * std.time.ns_per_ms);
 
-                        try server.ctx.maybeAccept();
+                        try server.ctx.maybeAccept(max_accept_timeout);
                         try server.ctx.submit();
                         try server.ctx.processCompletions();
                     }
