@@ -295,11 +295,17 @@ const ServerContext = struct {
                 },
                 .standalone => |standalone_cb| {
                     standalone_cb.call(self, cqe) catch |err| {
-                        logger.err("ctx#{d:<4} unexpected error {s}", .{ self.id, err });
+                        self.handleStandaloneCallbackError(err);
                     };
                 },
             }
         }
+    }
+
+    fn handleStandaloneCallbackError(self: *Self, err: anyerror) void {
+        if (err == error.Canceled) return;
+
+        logger.err("ctx#{d:<4} unexpected error {s}", .{ self.id, err });
     }
 
     fn handleClientCallbackError(self: *Self, client: *Client, err: anyerror) void {
@@ -390,7 +396,7 @@ const ServerContext = struct {
         switch (cqe.err()) {
             .SUCCESS => {},
             .CANCELED => {
-                logger.debug("ctx#{d:<4} ON ACCEPT timedout", .{self.id});
+                logger.debug("ctx#{d:<4} ON ACCEPT timed out", .{self.id});
                 return error.Canceled;
             },
             else => |err| {
@@ -417,7 +423,10 @@ const ServerContext = struct {
     fn onAcceptLinkTimeout(self: *Self, cqe: os.linux.io_uring_cqe) !void {
         switch (cqe.err()) {
             .CANCELED => {
-                logger.debug("ctx#{d:<4} ON LINK TIMEOUT operation finished before timeout", .{self.id});
+                logger.debug("ctx#{d:<4} ON LINK TIMEOUT operation finished, timeout canceled", .{self.id});
+            },
+            .ALREADY => {
+                logger.debug("ctx#{d:<4} ON LINK TIMEOUT operation already finished before timeout expired", .{self.id});
             },
             .TIME => {
                 logger.debug("ctx#{d:<4} ON LINK TIMEOUT timeout finished before accept", .{self.id});
