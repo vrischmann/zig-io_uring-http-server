@@ -56,12 +56,12 @@ const TestHarness = struct {
             .{},
             struct {
                 fn worker(server: *Server) !void {
-                    while (server.ctx.running.load(.SeqCst)) {
-                        try server.ctx.maybeAccept(10 * time.ns_per_ms);
-                        const submitted = try server.ctx.submit(1);
-                        _ = try server.ctx.processCompletions(submitted);
+                    while (server.running.load(.SeqCst)) {
+                        try server.maybeAccept(10 * time.ns_per_ms);
+                        const submitted = try server.submit(1);
+                        _ = try server.processCompletions(submitted);
                     }
-                    try server.ctx.drain();
+                    try server.drain();
                 }
             }.worker,
             .{&res.server},
@@ -72,7 +72,7 @@ const TestHarness = struct {
 
     fn deinit(self: *TestHarness) void {
         // Wait for the server to finish
-        self.server.ctx.running.store(false, .SeqCst);
+        self.server.running.store(false, .SeqCst);
         self.server.thread.join();
 
         // Clean up the server
