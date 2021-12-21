@@ -25,6 +25,10 @@ const max_serve_threads = 8;
 
 const logger = std.log.scoped(.main);
 
+/// Creates a server socket, bind it and listen on it.
+///
+/// This enables SO_REUSEADDR so that we can have multiple listeners
+/// on the same port, that way the kernel load balances connections to our workers.
 fn createServer(port: u16) !os.socket_t {
     const sockfd = try os.socket(os.AF.INET6, os.SOCK.STREAM, 0);
     errdefer os.close(sockfd);
@@ -237,6 +241,17 @@ const CallbackPool = struct {
     }
 };
 
+/// The HTTP server.
+///
+/// This struct does nothing by itself, the caller must drive it to achieve anything.
+/// After initialization the caller must, in a loop:
+/// * call maybeAccept
+/// * call submit
+/// * call processCompletions
+///
+/// Then the server will accept connections and process requests.
+///
+/// NOTE: this is _not_ thread safe ! You must create on Server object per thread.
 pub const Server = struct {
     const Self = @This();
 
@@ -246,16 +261,15 @@ pub const Server = struct {
     ring: IO_Uring,
     id: ID,
 
-    // the server loop will be running on this thread.
+    /// the server loop will be running on this thread.
     thread: std.Thread,
-
+    /// indicates is the server should continue running.
     running: Atomic(bool) = Atomic(bool).init(true),
+    /// the number of pending SQEs.
+    /// Necessary for drain() to work.
     pending: usize = 0,
 
-    //
-    // Listener state
-    //
-
+    /// Listener state
     listener: struct {
         server_fd: os.socket_t,
 
@@ -1213,7 +1227,6 @@ pub fn main() anyerror!void {
             .{},
             struct {
                 fn worker(server: *Server) !void {
-
                     // For debugging
                     var iteration: usize = 0;
 
