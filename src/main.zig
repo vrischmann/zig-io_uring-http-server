@@ -685,7 +685,7 @@ fn onReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
         return;
     }
 
-    // try processRequestWithBody(ctx, client);
+    try processRequestWithBody(ctx, client);
 }
 
 fn onOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
