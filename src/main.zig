@@ -8,6 +8,7 @@ const net = std.net;
 const os = std.os;
 const time = std.time;
 
+const Atomic = std.atomic.Atomic;
 const assert = std.debug.assert;
 
 const IO_Uring = std.os.linux.IO_Uring;
@@ -111,6 +112,8 @@ const RegisteredFileDescriptors = struct {
 };
 
 const Callback = struct {
+    debug_msg: []const u8,
+
     kind: union(enum) {
         client: struct {
             context: *Client,
@@ -123,8 +126,11 @@ const Callback = struct {
 
     next: ?*Callback = null,
 
-    pub fn initStandalone(self: *Callback, cb: fn (*ServerContext, io_uring_cqe) anyerror!void) void {
+    pub fn initStandalone(self: *Callback, comptime debug_msg: []const u8, cb: fn (*ServerContext, io_uring_cqe) anyerror!void) void {
+        logger.debug("CALLBACK ======== initializing standalone callback, msg: {s}", .{debug_msg});
+
         self.* = .{
+            .debug_msg = debug_msg,
             .kind = .{
                 .standalone = .{
                     .call = cb,
@@ -133,8 +139,11 @@ const Callback = struct {
         };
     }
 
-    pub fn initClient(self: *Callback, client: *Client, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) void {
+    pub fn initClient(self: *Callback, comptime debug_msg: []const u8, client: *Client, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) void {
+        logger.debug("CALLBACK ======== initializing client (addr={s}) callback, msg: {s}", .{ client.addr, debug_msg });
+
         self.* = .{
+            .debug_msg = debug_msg,
             .kind = .{
                 .client = .{
                     .context = client,
@@ -161,6 +170,7 @@ const CallbackPool = struct {
         while (i < max_ring_entries) : (i += 1) {
             const callback = try allocator.create(Callback);
             callback.* = .{
+                .debug_msg = "",
                 .kind = undefined,
                 .next = res.free_list,
             };
@@ -197,6 +207,9 @@ const CallbackPool = struct {
     }
 
     pub fn put(self: *Self, callback: *Callback) void {
+        logger.debug("CALLBACK ======== putting callback to pool, msg: {s}", .{callback.debug_msg});
+
+        callback.debug_msg = "";
         callback.kind = undefined;
         callback.next = self.free_list;
         self.free_list = callback;
@@ -211,6 +224,9 @@ const ServerContext = struct {
     root_allocator: mem.Allocator,
     ring: *IO_Uring,
     id: ID,
+
+    running: Atomic(bool) = Atomic(bool).init(true),
+    pending: usize = 0,
 
     //
     // Listener state
@@ -269,6 +285,9 @@ const ServerContext = struct {
     }
 
     pub fn maybeAccept(self: *Self, timeout: u63) !void {
+        if (!self.running.load(.SeqCst)) {
+            return;
+        }
         if (self.listener.accept_waiting or self.clients.list.items.len >= max_connections) {
             return;
         }
@@ -286,13 +305,21 @@ const ServerContext = struct {
         self.listener.accept_waiting = true;
     }
 
-    pub fn submit(self: *Self) !void {
-        _ = try self.ring.submit_and_wait(1);
+    pub fn drain(self: *Self) !void {
+        while (self.pending > 0) {
+            _ = try self.submit(0);
+            _ = try self.processCompletions(self.pending);
+        }
     }
 
-    pub fn processCompletions(self: *Self) !void {
-        const cqe_count = try self.ring.copy_cqes(&self.cqes, 1);
-        assert(cqe_count > 0);
+    pub fn submit(self: *Self, nr: u32) !usize {
+        const n = try self.ring.submit_and_wait(nr);
+        self.pending += n;
+        return n;
+    }
+
+    pub fn processCompletions(self: *Self, wait_nr: usize) !usize {
+        const cqe_count = try self.ring.copy_cqes(&self.cqes, @intCast(u32, wait_nr));
 
         for (self.cqes[0..cqe_count]) |cqe| {
             debug.assert(cqe.user_data != 0);
@@ -313,6 +340,10 @@ const ServerContext = struct {
                 },
             }
         }
+
+        self.pending -= cqe_count;
+
+        return cqe_count;
     }
 
     fn handleStandaloneCallbackError(self: *Self, err: anyerror) void {
@@ -348,7 +379,7 @@ const ServerContext = struct {
         });
 
         var tmp = self.callbacks.get() orelse return error.OutOfCallback;
-        tmp.initStandalone(onAccept);
+        tmp.initStandalone("submitAccept", onAccept);
 
         return try self.ring.accept(
             @ptrToInt(tmp),
@@ -363,7 +394,7 @@ const ServerContext = struct {
         logger.debug("ctx#{d:<4} submitting link timeout", .{self.id});
 
         var tmp = self.callbacks.get() orelse return error.OutOfCallback;
-        tmp.initStandalone(onAcceptLinkTimeout);
+        tmp.initStandalone("submitAcceptLinkTimeout", onAcceptLinkTimeout);
 
         return self.ring.link_timeout(
             @ptrToInt(tmp),
@@ -379,7 +410,7 @@ const ServerContext = struct {
         });
 
         var tmp = self.callbacks.get() orelse return error.OutOfCallback;
-        tmp.initStandalone(cb);
+        tmp.initStandalone("submitStandaloneClose", cb);
 
         return self.ring.close(
             @ptrToInt(tmp),
@@ -395,7 +426,7 @@ const ServerContext = struct {
         });
 
         var tmp = self.callbacks.get() orelse return error.OutOfCallback;
-        tmp.initClient(client, cb);
+        tmp.initClient("submitClose", client, cb);
 
         return self.ring.close(
             @ptrToInt(tmp),
@@ -657,7 +688,7 @@ fn onReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
         return;
     }
 
-    // try processRequestWithBody(ctx, client);
+    try processRequestWithBody(ctx, client);
 }
 
 fn onOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
@@ -1037,7 +1068,7 @@ fn submitRead(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u64
     });
 
     var tmp = ctx.callbacks.get() orelse return error.OutOfCallback;
-    tmp.initClient(client, cb);
+    tmp.initClient("submitRead", client, cb);
 
     return ctx.ring.read(
         @ptrToInt(tmp),
@@ -1058,7 +1089,7 @@ fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.fd_t, offset: u64, c
     });
 
     var tmp = ctx.callbacks.get() orelse return error.OutOfCallback;
-    tmp.initClient(client, cb);
+    tmp.initClient("submitWrite", client, cb);
 
     var sqe = try ctx.ring.write(
         @ptrToInt(tmp),
@@ -1077,7 +1108,7 @@ fn submitOpenFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flag
     });
 
     var tmp = ctx.callbacks.get() orelse return error.OutOfCallback;
-    tmp.initClient(client, cb);
+    tmp.initClient("submitOpenFile", client, cb);
 
     return try ctx.ring.openat(
         @ptrToInt(tmp),
@@ -1096,7 +1127,7 @@ fn submitStatxFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, fla
     });
 
     var tmp = ctx.callbacks.get() orelse return error.OutOfCallback;
-    tmp.initClient(client, cb);
+    tmp.initClient("submitStatxFile", client, cb);
 
     var sqe = try ctx.ring.statx(
         @ptrToInt(tmp),
@@ -1187,8 +1218,8 @@ pub fn main() anyerror!void {
                         // std.time.sleep(300 * std.time.ns_per_ms);
 
                         try server.ctx.maybeAccept(max_accept_timeout);
-                        try server.ctx.submit();
-                        try server.ctx.processCompletions();
+                        const submitted = try server.ctx.submit(1);
+                        _ = try server.ctx.processCompletions(submitted);
                     }
                 }
             }.worker,
