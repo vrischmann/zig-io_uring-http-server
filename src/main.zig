@@ -128,16 +128,16 @@ const Callback = struct {
     kind: union(enum) {
         client: struct {
             context: *Client,
-            call: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void,
+            call: fn (*Server, *Client, io_uring_cqe) anyerror!void,
         },
         standalone: struct {
-            call: fn (*ServerContext, io_uring_cqe) anyerror!void,
+            call: fn (*Server, io_uring_cqe) anyerror!void,
         },
     },
 
     next: ?*Callback = null,
 
-    pub fn initStandalone(self: *Callback, comptime debug_msg: []const u8, cb: fn (*ServerContext, io_uring_cqe) anyerror!void) void {
+    pub fn initStandalone(self: *Callback, comptime debug_msg: []const u8, cb: fn (*Server, io_uring_cqe) anyerror!void) void {
         logger.debug("CALLBACK ======== initializing standalone callback, msg: {s}", .{debug_msg});
 
         self.* = .{
@@ -150,7 +150,7 @@ const Callback = struct {
         };
     }
 
-    pub fn initClient(self: *Callback, comptime debug_msg: []const u8, client: *Client, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) void {
+    pub fn initClient(self: *Callback, comptime debug_msg: []const u8, client: *Client, cb: fn (*Server, *Client, io_uring_cqe) anyerror!void) void {
         logger.debug("CALLBACK ======== initializing client (addr={s}) callback, msg: {s}", .{ client.addr, debug_msg });
 
         self.* = .{
@@ -237,14 +237,17 @@ const CallbackPool = struct {
     }
 };
 
-const ServerContext = struct {
+pub const Server = struct {
     const Self = @This();
 
     const ID = usize;
 
     root_allocator: mem.Allocator,
-    ring: *IO_Uring,
+    ring: IO_Uring,
     id: ID,
+
+    // the server loop will be running on this thread.
+    thread: std.Thread,
 
     running: Atomic(bool) = Atomic(bool).init(true),
     pending: usize = 0,
@@ -279,11 +282,12 @@ const ServerContext = struct {
 
     registered_fds: RegisteredFileDescriptors,
 
-    pub fn init(allocator: mem.Allocator, ring: *IO_Uring, id: ID, server_fd: os.socket_t) !Self {
-        var res = Self{
+    pub fn init(self: *Self, allocator: mem.Allocator, id: ID, server_fd: os.socket_t) !void {
+        self.* = .{
             .root_allocator = allocator,
-            .ring = ring,
+            .ring = try std.os.linux.IO_Uring.init(max_ring_entries, 0),
             .id = id,
+            .thread = undefined,
             .listener = .{
                 .server_fd = server_fd,
             },
@@ -293,7 +297,7 @@ const ServerContext = struct {
             .callbacks = try CallbackPool.init(allocator),
             .registered_fds = .{},
         };
-        return res;
+        try self.registered_fds.register(&self.ring);
     }
 
     pub fn deinit(self: *Self) void {
@@ -303,6 +307,7 @@ const ServerContext = struct {
         }
         self.clients.list.deinit();
         self.callbacks.deinit();
+        self.ring.deinit();
     }
 
     pub fn maybeAccept(self: *Self, timeout: u63) !void {
@@ -424,7 +429,7 @@ const ServerContext = struct {
         );
     }
 
-    fn submitStandaloneClose(self: *ServerContext, fd: os.fd_t, cb: fn (*ServerContext, io_uring_cqe) anyerror!void) !*io_uring_sqe {
+    fn submitStandaloneClose(self: *Server, fd: os.fd_t, cb: fn (*Server, io_uring_cqe) anyerror!void) !*io_uring_sqe {
         logger.debug("ctx#{d:<4} submitting close of {d}", .{
             self.id,
             fd,
@@ -439,7 +444,7 @@ const ServerContext = struct {
         );
     }
 
-    fn submitClose(self: *ServerContext, client: *Client, fd: os.fd_t, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) !*io_uring_sqe {
+    fn submitClose(self: *Server, client: *Client, fd: os.fd_t, cb: fn (*Server, *Client, io_uring_cqe) anyerror!void) !*io_uring_sqe {
         logger.debug("ctx#{d:<4} addr={s} submitting close of {d}", .{
             self.id,
             client.addr,
@@ -547,10 +552,10 @@ const ServerContext = struct {
     }
 };
 
-fn releaseRegisteredFileDescriptor(ctx: *ServerContext, client: *Client) void {
+fn releaseRegisteredFileDescriptor(ctx: *Server, client: *Client) void {
     if (client.registered_fd) |registered_fd| {
         ctx.registered_fds.release(registered_fd);
-        ctx.registered_fds.update(ctx.ring) catch |err| {
+        ctx.registered_fds.update(&ctx.ring) catch |err| {
             logger.err("ctx#{d:<4} unable to update registered file descriptors, err={}", .{ ctx.id, err });
         };
         client.registered_fd = null;
@@ -625,7 +630,7 @@ const Client = struct {
     }
 };
 
-fn onReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+fn onReadRequest(ctx: *Server, client: *Client, cqe: io_uring_cqe) !void {
     _ = ctx;
 
     switch (cqe.err()) {
@@ -666,7 +671,7 @@ fn onReadRequest(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void 
     }
 }
 
-fn onReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+fn onReadBody(ctx: *Server, client: *Client, cqe: io_uring_cqe) !void {
     _ = ctx;
 
     switch (cqe.err()) {
@@ -712,7 +717,7 @@ fn onReadBody(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
     try processRequestWithBody(ctx, client);
 }
 
-fn onOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+fn onOpenResponseFile(ctx: *Server, client: *Client, cqe: io_uring_cqe) !void {
     debug.assert(client.buffer.items.len == 0);
 
     _ = ctx;
@@ -751,7 +756,7 @@ fn onOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !
     // }
 }
 
-fn onStatxResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+fn onStatxResponseFile(ctx: *Server, client: *Client, cqe: io_uring_cqe) !void {
     _ = ctx;
 
     switch (cqe.err()) {
@@ -800,7 +805,7 @@ fn onStatxResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) 
     }
 }
 
-fn onReadResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+fn onReadResponseFile(ctx: *Server, client: *Client, cqe: io_uring_cqe) !void {
     debug.assert(client.buffer.items.len > 0);
 
     switch (cqe.err()) {
@@ -828,7 +833,7 @@ fn onReadResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !
     try submitWrite(ctx, client, client.fd, 0, onWriteResponseFile);
 }
 
-fn onWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+fn onWriteResponseFile(ctx: *Server, client: *Client, cqe: io_uring_cqe) !void {
     debug.assert(client.buffer.items.len > 0);
 
     switch (cqe.err()) {
@@ -897,7 +902,7 @@ fn onWriteResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) 
     _ = try submitRead(ctx, client, client.fd, 0, onReadRequest);
 }
 
-fn onCloseResponseFile(ctx: *ServerContext, client: *Client, cqe: os.linux.io_uring_cqe) !void {
+fn onCloseResponseFile(ctx: *Server, client: *Client, cqe: os.linux.io_uring_cqe) !void {
     logger.debug("ctx#{d:<4} addr={s} HANDLE CLOSE RESPONSE FILE fd={}", .{
         ctx.id,
         client.addr,
@@ -913,7 +918,7 @@ fn onCloseResponseFile(ctx: *ServerContext, client: *Client, cqe: os.linux.io_ur
     }
 }
 
-fn onWriteResponseBuffer(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !void {
+fn onWriteResponseBuffer(ctx: *Server, client: *Client, cqe: io_uring_cqe) !void {
     switch (cqe.err()) {
         .SUCCESS => {},
         .PIPE => {
@@ -954,7 +959,7 @@ fn onWriteResponseBuffer(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe
     _ = try submitRead(ctx, client, client.fd, 0, onReadRequest);
 }
 
-fn submitWriteNotFound(ctx: *ServerContext, client: *Client) !void {
+fn submitWriteNotFound(ctx: *Server, client: *Client) !void {
     _ = ctx;
 
     logger.debug("ctx#{d:<4} addr={s} returning 404 Not Found", .{
@@ -969,7 +974,7 @@ fn submitWriteNotFound(ctx: *ServerContext, client: *Client) !void {
     try submitWrite(ctx, client, client.fd, 0, onWriteResponseBuffer);
 }
 
-fn processRequestWithBody(ctx: *ServerContext, client: *Client) !void {
+fn processRequestWithBody(ctx: *Server, client: *Client) !void {
     _ = ctx;
 
     logger.debug("ctx#{d:<4} addr={s} body data=\"{s}\" size={s}", .{
@@ -988,7 +993,7 @@ fn processRequestWithBody(ctx: *ServerContext, client: *Client) !void {
     try submitWrite(ctx, client, client.fd, 0, onWriteResponseBuffer);
 }
 
-fn processRequest(ctx: *ServerContext, client: *Client) !void {
+fn processRequest(ctx: *Server, client: *Client) !void {
     const req = client.request.result.req;
 
     logger.debug("ctx#{d:<4} addr={s} parsed HTTP request", .{ ctx.id, client.addr });
@@ -1080,7 +1085,7 @@ fn processRequest(ctx: *ServerContext, client: *Client) !void {
     try submitWrite(ctx, client, client.fd, 0, onWriteResponseBuffer);
 }
 
-fn submitRead(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u64, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) !*io_uring_sqe {
+fn submitRead(ctx: *Server, client: *Client, fd: os.socket_t, offset: u64, cb: fn (*Server, *Client, io_uring_cqe) anyerror!void) !*io_uring_sqe {
     logger.debug("ctx#{d:<4} addr={s} submitting read from {d}, offset {d}", .{
         ctx.id,
         client.addr,
@@ -1099,7 +1104,7 @@ fn submitRead(ctx: *ServerContext, client: *Client, fd: os.socket_t, offset: u64
     );
 }
 
-fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.fd_t, offset: u64, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) !void {
+fn submitWrite(ctx: *Server, client: *Client, fd: os.fd_t, offset: u64, cb: fn (*Server, *Client, io_uring_cqe) anyerror!void) !void {
     logger.debug("ctx#{d:<4} addr={s} submitting write of {s} to {d}, offset {d}, data=\"{s}\"", .{
         ctx.id,
         client.addr,
@@ -1121,7 +1126,7 @@ fn submitWrite(ctx: *ServerContext, client: *Client, fd: os.fd_t, offset: u64, c
     _ = sqe;
 }
 
-fn submitOpenFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flags: u32, mode: os.mode_t, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) !*io_uring_sqe {
+fn submitOpenFile(ctx: *Server, client: *Client, path: [:0]const u8, flags: u32, mode: os.mode_t, cb: fn (*Server, *Client, io_uring_cqe) anyerror!void) !*io_uring_sqe {
     logger.debug("ctx#{d:<4} addr={s} submitting open, path=\"{s}\"", .{
         ctx.id,
         client.addr,
@@ -1140,7 +1145,7 @@ fn submitOpenFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flag
     );
 }
 
-fn submitStatxFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, flags: u32, mask: u32, buf: *os.linux.Statx, cb: fn (*ServerContext, *Client, io_uring_cqe) anyerror!void) !void {
+fn submitStatxFile(ctx: *Server, client: *Client, path: [:0]const u8, flags: u32, mask: u32, buf: *os.linux.Statx, cb: fn (*Server, *Client, io_uring_cqe) anyerror!void) !void {
     logger.debug("ctx#{d:<4} addr={s} submitting statx, path=\"{s}\"", .{
         ctx.id,
         client.addr,
@@ -1160,31 +1165,6 @@ fn submitStatxFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, fla
     );
     _ = sqe;
 }
-
-pub const Server = struct {
-    const Self = @This();
-
-    allocator: mem.Allocator,
-
-    ring: IO_Uring,
-    ctx: ServerContext,
-
-    thread: std.Thread,
-
-    pub fn init(self: *Self, allocator: mem.Allocator, id: ServerContext.ID, server_fd: os.socket_t) !void {
-        self.allocator = allocator;
-
-        self.ring = try std.os.linux.IO_Uring.init(max_ring_entries, 0);
-
-        self.ctx = try ServerContext.init(allocator, &self.ring, id, server_fd);
-        try self.ctx.registered_fds.register(&self.ring);
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.ctx.deinit();
-        self.ring.deinit();
-    }
-};
 
 pub fn main() anyerror!void {
     var gpa = heap.GeneralPurposeAllocator(.{}){};
@@ -1238,9 +1218,9 @@ pub fn main() anyerror!void {
                         // if (iteration > 3) break;
                         // std.time.sleep(300 * std.time.ns_per_ms);
 
-                        try server.ctx.maybeAccept(max_accept_timeout);
-                        const submitted = try server.ctx.submit(1);
-                        _ = try server.ctx.processCompletions(submitted);
+                        try server.maybeAccept(max_accept_timeout);
+                        const submitted = try server.submit(1);
+                        _ = try server.processCompletions(submitted);
                     }
                 }
             }.worker,
