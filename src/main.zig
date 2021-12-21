@@ -111,6 +111,17 @@ const RegisteredFileDescriptors = struct {
     }
 };
 
+/// Callback encapsulates a context and a function pointer that will be called when
+/// the server loop will process the CQEs.
+/// Pointers to this structure is what get passed as user data in a SQE and what we later get back in a CQE.
+///
+/// There are two kinds of callbacks currently:
+/// * operations associated with a client
+/// * operations not associated with a client
+///
+/// When a user gets a callback they must call initStandalone or initClient.
+///
+/// A callback also has a debug message that is known at compile time.
 const Callback = struct {
     debug_msg: []const u8,
 
@@ -154,6 +165,11 @@ const Callback = struct {
     }
 };
 
+/// CallbackPool is a pool of callback objects that facilitates lifecycle management of a callback.
+/// The implementation is a free list of pre-allocated objects.
+///
+/// For each SQEs a callback must be obtained via get().
+/// When the server loop is processing CQEs it will use the callback and then release it with put().
 const CallbackPool = struct {
     const Self = @This();
 
@@ -165,6 +181,8 @@ const CallbackPool = struct {
             .allocator = allocator,
             .free_list = null,
         };
+
+        // Preallocate as many callbacks as ring entries.
 
         var i: usize = 0;
         while (i < max_ring_entries) : (i += 1) {
@@ -189,6 +207,7 @@ const CallbackPool = struct {
         }
     }
 
+    /// Returns the number of callback in the pool.
     pub fn count(self: *Self) usize {
         var n: usize = 0;
         var ret = self.free_list;
@@ -199,6 +218,7 @@ const CallbackPool = struct {
         return n;
     }
 
+    /// Returns a ready to use callback or null if none are available.
     pub fn get(self: *Self) ?*Callback {
         const ret = self.free_list orelse return null;
         self.free_list = ret.next;
@@ -206,6 +226,7 @@ const CallbackPool = struct {
         return ret;
     }
 
+    /// Reset the callback and puts it back into the pool.
     pub fn put(self: *Self, callback: *Callback) void {
         logger.debug("CALLBACK ======== putting callback to pool, msg: {s}", .{callback.debug_msg});
 
