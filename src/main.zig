@@ -285,6 +285,9 @@ const ServerContext = struct {
     }
 
     pub fn maybeAccept(self: *Self, timeout: u63) !void {
+        if (!self.running.load(.SeqCst)) {
+            return;
+        }
         if (self.listener.accept_waiting or self.clients.list.items.len >= max_connections) {
             return;
         }
