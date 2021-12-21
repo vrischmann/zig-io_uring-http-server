@@ -1,5 +1,6 @@
 const std = @import("std");
 const heap = std.heap;
+const io = std.io;
 const mem = std.mem;
 
 const c = @cImport({
@@ -17,7 +18,7 @@ pub const Response = struct {
     }
 };
 
-pub fn do(allocator: mem.Allocator, method: []const u8, url: [:0]const u8) !Response {
+pub fn do(allocator: mem.Allocator, method: []const u8, url: [:0]const u8, body_opt: ?[]const u8) !Response {
     _ = method;
 
     if (c.curl_global_init(c.CURL_GLOBAL_ALL) != c.CURLE_OK) {
@@ -36,6 +37,19 @@ pub fn do(allocator: mem.Allocator, method: []const u8, url: [:0]const u8) !Resp
     // set write function callbacks
     _ = c.curl_easy_setopt(handle, c.CURLOPT_WRITEFUNCTION, writeToArrayListCallback);
     _ = c.curl_easy_setopt(handle, c.CURLOPT_WRITEDATA, &response);
+
+    // set read function callbacks
+
+    var headers: [*c]c.curl_slist = null;
+    defer c.curl_slist_free_all(headers);
+
+    if (body_opt) |data| {
+        headers = c.curl_slist_append(headers, "Content-Type: application/json");
+
+        _ = c.curl_easy_setopt(handle, c.CURLOPT_HTTPHEADER, headers);
+        _ = c.curl_easy_setopt(handle, c.CURLOPT_POSTFIELDSIZE, data.len);
+        _ = c.curl_easy_setopt(handle, c.CURLOPT_COPYPOSTFIELDS, data.ptr);
+    }
 
     // perform
     if (c.curl_easy_perform(handle) != c.CURLE_OK) {
