@@ -158,7 +158,7 @@ const CallbackPool = struct {
         };
 
         var i: usize = 0;
-        while (i < max_connections * 32) : (i += 1) {
+        while (i < max_ring_entries) : (i += 1) {
             const callback = try allocator.create(Callback);
             callback.* = .{
                 .kind = undefined,
@@ -171,9 +171,22 @@ const CallbackPool = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        // All callbacks must be put back in the pool before deinit is called
+        assert(self.count() == max_ring_entries);
+
         while (self.get()) |item| {
             self.allocator.destroy(item);
         }
+    }
+
+    pub fn count(self: *Self) usize {
+        var n: usize = 0;
+        var ret = self.free_list;
+        while (ret) |item| {
+            n += 1;
+            ret = item.next;
+        }
+        return n;
     }
 
     pub fn get(self: *Self) ?*Callback {
@@ -255,7 +268,7 @@ const ServerContext = struct {
         self.callbacks.deinit();
     }
 
-    fn maybeAccept(self: *Self, timeout: u63) !void {
+    pub fn maybeAccept(self: *Self, timeout: u63) !void {
         if (self.listener.accept_waiting or self.clients.list.items.len >= max_connections) {
             return;
         }
@@ -273,11 +286,11 @@ const ServerContext = struct {
         self.listener.accept_waiting = true;
     }
 
-    fn submit(self: *Self) !void {
+    pub fn submit(self: *Self) !void {
         _ = try self.ring.submit_and_wait(1);
     }
 
-    fn processCompletions(self: *Self) !void {
+    pub fn processCompletions(self: *Self) !void {
         const cqe_count = try self.ring.copy_cqes(&self.cqes, 1);
         assert(cqe_count > 0);
 
@@ -448,6 +461,7 @@ const ServerContext = struct {
         // Cleanup resources
         releaseRegisteredFileDescriptor(self, client);
         client.deinit();
+        self.root_allocator.destroy(client);
 
         // Remove client from list
         const maybe_pos: ?usize = for (self.clients.list.items) |item, i| {
@@ -656,7 +670,7 @@ fn onOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !
         .NOENT => {
             client.temp_buffer_fba.reset();
 
-            logger.err("ctx#{d:<4} addr={s} no such file or directory, path=\"{s}\"", .{
+            logger.warn("ctx#{d:<4} addr={s} no such file or directory, path=\"{s}\"", .{
                 ctx.id,
                 client.addr,
                 fmt.fmtSliceEscapeLower(client.response.file.path),
@@ -1095,7 +1109,7 @@ fn submitStatxFile(ctx: *ServerContext, client: *Client, path: [:0]const u8, fla
     _ = sqe;
 }
 
-const Server = struct {
+pub const Server = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
@@ -1105,7 +1119,7 @@ const Server = struct {
 
     thread: std.Thread,
 
-    fn init(self: *Self, allocator: mem.Allocator, id: ServerContext.ID, server_fd: os.socket_t) !void {
+    pub fn init(self: *Self, allocator: mem.Allocator, id: ServerContext.ID, server_fd: os.socket_t) !void {
         self.allocator = allocator;
 
         self.ring = try std.os.linux.IO_Uring.init(max_ring_entries, 0);
@@ -1114,7 +1128,8 @@ const Server = struct {
         try self.ctx.registered_fds.register(&self.ring);
     }
 
-    fn deinit(self: *Self) void {
+    pub fn deinit(self: *Self) void {
+        self.ctx.deinit();
         self.ring.deinit();
     }
 };
