@@ -670,7 +670,7 @@ fn onOpenResponseFile(ctx: *ServerContext, client: *Client, cqe: io_uring_cqe) !
         .NOENT => {
             client.temp_buffer_fba.reset();
 
-            logger.err("ctx#{d:<4} addr={s} no such file or directory, path=\"{s}\"", .{
+            logger.warn("ctx#{d:<4} addr={s} no such file or directory, path=\"{s}\"", .{
                 ctx.id,
                 client.addr,
                 fmt.fmtSliceEscapeLower(client.response.file.path),
