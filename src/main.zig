@@ -8,6 +8,7 @@ const net = std.net;
 const os = std.os;
 const time = std.time;
 
+const Atomic = std.atomic.Atomic;
 const assert = std.debug.assert;
 
 const IO_Uring = std.os.linux.IO_Uring;
@@ -212,6 +213,9 @@ const ServerContext = struct {
     ring: *IO_Uring,
     id: ID,
 
+    running: Atomic(bool) = Atomic(bool).init(true),
+    pending: usize = 0,
+
     //
     // Listener state
     //
@@ -286,13 +290,21 @@ const ServerContext = struct {
         self.listener.accept_waiting = true;
     }
 
-    pub fn submit(self: *Self) !void {
-        _ = try self.ring.submit_and_wait(1);
+    pub fn drain(self: *Self) !void {
+        while (self.pending > 0) {
+            _ = try self.submit(0);
+            _ = try self.processCompletions(self.pending);
+        }
     }
 
-    pub fn processCompletions(self: *Self) !void {
-        const cqe_count = try self.ring.copy_cqes(&self.cqes, 1);
-        assert(cqe_count > 0);
+    pub fn submit(self: *Self, nr: u32) !usize {
+        const n = try self.ring.submit_and_wait(nr);
+        self.pending += n;
+        return n;
+    }
+
+    pub fn processCompletions(self: *Self, wait_nr: usize) !usize {
+        const cqe_count = try self.ring.copy_cqes(&self.cqes, @intCast(u32, wait_nr));
 
         for (self.cqes[0..cqe_count]) |cqe| {
             debug.assert(cqe.user_data != 0);
@@ -313,6 +325,10 @@ const ServerContext = struct {
                 },
             }
         }
+
+        self.pending -= cqe_count;
+
+        return cqe_count;
     }
 
     fn handleStandaloneCallbackError(self: *Self, err: anyerror) void {
@@ -1187,8 +1203,8 @@ pub fn main() anyerror!void {
                         // std.time.sleep(300 * std.time.ns_per_ms);
 
                         try server.ctx.maybeAccept(max_accept_timeout);
-                        try server.ctx.submit();
-                        try server.ctx.processCompletions();
+                        const submitted = try server.ctx.submit(1);
+                        _ = try server.ctx.processCompletions(submitted);
                     }
                 }
             }.worker,
