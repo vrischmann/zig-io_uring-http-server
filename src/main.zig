@@ -461,6 +461,7 @@ const ServerContext = struct {
         // Cleanup resources
         releaseRegisteredFileDescriptor(self, client);
         client.deinit();
+        self.root_allocator.destroy(client);
 
         // Remove client from list
         const maybe_pos: ?usize = for (self.clients.list.items) |item, i| {
