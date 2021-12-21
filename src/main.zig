@@ -158,7 +158,7 @@ const CallbackPool = struct {
         };
 
         var i: usize = 0;
-        while (i < max_connections * 32) : (i += 1) {
+        while (i < max_ring_entries) : (i += 1) {
             const callback = try allocator.create(Callback);
             callback.* = .{
                 .kind = undefined,
@@ -171,9 +171,22 @@ const CallbackPool = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        // All callbacks must be put back in the pool before deinit is called
+        assert(self.count() == max_ring_entries);
+
         while (self.get()) |item| {
             self.allocator.destroy(item);
         }
+    }
+
+    pub fn count(self: *Self) usize {
+        var n: usize = 0;
+        var ret = self.free_list;
+        while (ret) |item| {
+            n += 1;
+            ret = item.next;
+        }
+        return n;
     }
 
     pub fn get(self: *Self) ?*Callback {
