@@ -465,6 +465,10 @@ pub const Server = struct {
 
         switch (cqe.err()) {
             .SUCCESS => {},
+            .INTR => {
+                logger.debug("ctx#{d:<4} ON ACCEPT interrupted", .{self.id});
+                return error.Canceled;
+            },
             .CANCELED => {
                 logger.debug("ctx#{d:<4} ON ACCEPT timed out", .{self.id});
                 return error.Canceled;
