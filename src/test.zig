@@ -11,7 +11,7 @@ const Atomic = std.atomic.Atomic;
 const assert = std.debug.assert;
 
 const curl = @import("curl.zig");
-const Server = @import("main.zig").Server;
+const lib = @import("lib.zig");
 
 const port = 34450;
 
@@ -19,7 +19,7 @@ const TestHarness = struct {
     root_allocator: mem.Allocator,
     arena: heap.ArenaAllocator,
     socket: os.socket_t,
-    server: Server,
+    server: lib.Server,
 
     fn create(allocator: mem.Allocator) !*TestHarness {
         const socket = blk: {
@@ -55,7 +55,7 @@ const TestHarness = struct {
         res.server.thread = try std.Thread.spawn(
             .{},
             struct {
-                fn worker(server: *Server) !void {
+                fn worker(server: *lib.Server) !void {
                     return server.run(10 * time.ns_per_ms);
                 }
             }.worker,
