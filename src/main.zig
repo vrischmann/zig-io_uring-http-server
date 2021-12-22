@@ -20,7 +20,6 @@ const http = @import("http.zig");
 const max_ring_entries = 512;
 const max_buffer_size = 4096;
 const max_connections = 128;
-const max_accept_timeout = 30 * time.ns_per_s;
 const max_serve_threads = 8;
 
 const logger = std.log.scoped(.main);
@@ -322,6 +321,15 @@ pub const Server = struct {
         self.clients.list.deinit();
         self.callbacks.deinit();
         self.ring.deinit();
+    }
+
+    pub fn run(self: *Self, accept_timeout: u63) !void {
+        while (self.running.load(.SeqCst)) {
+            try self.maybeAccept(accept_timeout);
+            const submitted = try self.submit(1);
+            _ = try self.processCompletions(submitted);
+        }
+        try self.drain();
     }
 
     pub fn maybeAccept(self: *Self, timeout: u63) !void {
@@ -1227,18 +1235,7 @@ pub fn main() anyerror!void {
             .{},
             struct {
                 fn worker(server: *Server) !void {
-                    // For debugging
-                    var iteration: usize = 0;
-
-                    while (true) : (iteration += 1) {
-                        // NOTE(vincent): for debugging
-                        // if (iteration > 3) break;
-                        // std.time.sleep(300 * std.time.ns_per_ms);
-
-                        try server.maybeAccept(max_accept_timeout);
-                        const submitted = try server.submit(1);
-                        _ = try server.processCompletions(submitted);
-                    }
+                    return server.run(30 * time.ns_per_s);
                 }
             }.worker,
             .{v},

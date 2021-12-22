@@ -56,12 +56,7 @@ const TestHarness = struct {
             .{},
             struct {
                 fn worker(server: *Server) !void {
-                    while (server.running.load(.SeqCst)) {
-                        try server.maybeAccept(10 * time.ns_per_ms);
-                        const submitted = try server.submit(1);
-                        _ = try server.processCompletions(submitted);
-                    }
-                    try server.drain();
+                    return server.run(10 * time.ns_per_ms);
                 }
             }.worker,
             .{&res.server},
