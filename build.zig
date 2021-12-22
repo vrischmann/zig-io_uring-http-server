@@ -21,6 +21,7 @@ pub fn build(b: *std.build.Builder) void {
     picohttp.linkLibC();
 
     const exe = b.addExecutable("httpserver", "src/main.zig");
+    exe.addPackagePath("httpserver", "src/lib.zig");
     exe.addIncludeDir("src");
     exe.setTarget(target);
     exe.setBuildMode(mode);
