@@ -114,20 +114,6 @@ test "GET 200 OK" {
     }
 }
 
-test "GET 404 Not Found" {
-    var th = try TestHarness.create(testing.allocator);
-    defer th.deinit();
-
-    var i: usize = 0;
-    while (i < 20) : (i += 1) {
-        var resp = try th.do("GET", "/static/notfound.txt", null);
-        defer resp.deinit();
-
-        try testing.expectEqual(@as(usize, 404), resp.response_code);
-        try testing.expectEqual(@as(usize, 0), resp.data.len);
-    }
-}
-
 test "POST 200 OK" {
     var th = try TestHarness.create(testing.allocator);
     defer th.deinit();
@@ -144,5 +130,30 @@ test "POST 200 OK" {
 
         try testing.expectEqual(@as(usize, 200), resp.response_code);
         try testing.expectEqualStrings("Hello, World!", resp.data);
+    }
+}
+
+test "GET files" {
+    var th = try TestHarness.create(testing.allocator);
+    defer th.deinit();
+
+    const test_cases = &[_]struct {
+        path: []const u8,
+        exp_data: []const u8,
+        exp_response_code: usize,
+    }{
+        .{ .path = "/static/foobar.txt", .exp_data = "foobar content\n", .exp_response_code = 200 },
+        .{ .path = "/static/notfound.txt", .exp_data = "", .exp_response_code = 404 },
+    };
+
+    inline for (test_cases) |tc| {
+        var i: usize = 0;
+        while (i < 20) : (i += 1) {
+            var resp = try th.do("GET", tc.path, null);
+            defer resp.deinit();
+
+            try testing.expectEqual(tc.exp_response_code, resp.response_code);
+            try testing.expectEqualStrings(tc.exp_data, resp.data);
+        }
     }
 }
