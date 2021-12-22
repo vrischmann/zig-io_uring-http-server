@@ -527,7 +527,7 @@ pub const Server = struct {
     }
 
     fn onCloseClient(self: *Self, client: *Client, cqe: os.linux.io_uring_cqe) !void {
-        logger.debug("ctx#{d:<4} addr={s} HANDLE CLOSE CLIENT fd={}", .{
+        logger.debug("ctx#{d:<4} addr={s} ON CLOSE CLIENT fd={}", .{
             self.id,
             client.addr,
             client.fd,
@@ -558,7 +558,7 @@ pub const Server = struct {
     }
 
     fn onClose(self: *Self, cqe: os.linux.io_uring_cqe) !void {
-        logger.debug("ctx#{d:<4} HANDLE CLOSE", .{self.id});
+        logger.debug("ctx#{d:<4} ON CLOSE", .{self.id});
 
         switch (cqe.err()) {
             .SUCCESS => {},
@@ -762,7 +762,7 @@ fn onOpenResponseFile(ctx: *Server, client: *Client, cqe: io_uring_cqe) !void {
 
     client.response.file.fd = @intCast(os.fd_t, cqe.res);
 
-    logger.debug("ctx#{d:<4} addr={s} HANDLE OPEN FILE fd={}", .{ ctx.id, client.addr, client.response.file.fd });
+    logger.debug("ctx#{d:<4} addr={s} ON OPEN RESPONSE FILE fd={}", .{ ctx.id, client.addr, client.response.file.fd });
 
     client.temp_buffer_fba.reset();
 
@@ -829,7 +829,7 @@ fn onReadResponseFile(ctx: *Server, client: *Client, cqe: io_uring_cqe) !void {
     switch (cqe.err()) {
         .SUCCESS => {},
         else => |err| {
-            logger.err("ctx#{d:<4} addr={s} HANDLE READ RESPONSE FILE unexpected errno={}", .{ ctx.id, client.addr, err });
+            logger.err("ctx#{d:<4} addr={s} ON READ RESPONSE FILE unexpected errno={}", .{ ctx.id, client.addr, err });
             return error.Unexpected;
         },
     }
@@ -839,7 +839,7 @@ fn onReadResponseFile(ctx: *Server, client: *Client, cqe: io_uring_cqe) !void {
 
     const read = @intCast(usize, cqe.res);
 
-    logger.debug("ctx#{d:<4} addr={s} HANDLE READ RESPONSE FILE read of {d} bytes from {d} succeeded", .{
+    logger.debug("ctx#{d:<4} addr={s} ON READ RESPONSE FILE read of {d} bytes from {d} succeeded", .{
         ctx.id,
         client.addr,
         read,
@@ -857,7 +857,7 @@ fn onWriteResponseFile(ctx: *Server, client: *Client, cqe: io_uring_cqe) !void {
     switch (cqe.err()) {
         .SUCCESS => {},
         else => |err| {
-            logger.err("ctx#{d:<4} addr={s} HANDLE WRITE RESPONSE FILE unexpected errno={}", .{ ctx.id, client.addr, err });
+            logger.err("ctx#{d:<4} addr={s} ON WRITE RESPONSE FILE unexpected errno={}", .{ ctx.id, client.addr, err });
             return error.Unexpected;
         },
     }
@@ -867,7 +867,7 @@ fn onWriteResponseFile(ctx: *Server, client: *Client, cqe: io_uring_cqe) !void {
 
     const written = @intCast(usize, cqe.res);
 
-    logger.debug("ctx#{d:<4} addr={s} HANDLE WRITE RESPONSE FILE write of {d} bytes to {d} succeeded", .{
+    logger.debug("ctx#{d:<4} addr={s} ON WRITE RESPONSE FILE write of {d} bytes to {d} succeeded", .{
         ctx.id,
         client.addr,
         written,
@@ -900,7 +900,7 @@ fn onWriteResponseFile(ctx: *Server, client: *Client, cqe: io_uring_cqe) !void {
         return;
     }
 
-    logger.debug("ctx#{d:<4} addr={s} HANDLE WRITE RESPONSE FILE done", .{
+    logger.debug("ctx#{d:<4} addr={s} ON WRITE RESPONSE FILE done", .{
         ctx.id,
         client.addr,
     });
@@ -921,7 +921,7 @@ fn onWriteResponseFile(ctx: *Server, client: *Client, cqe: io_uring_cqe) !void {
 }
 
 fn onCloseResponseFile(ctx: *Server, client: *Client, cqe: os.linux.io_uring_cqe) !void {
-    logger.debug("ctx#{d:<4} addr={s} HANDLE CLOSE RESPONSE FILE fd={}", .{
+    logger.debug("ctx#{d:<4} addr={s} ON CLOSE RESPONSE FILE fd={}", .{
         ctx.id,
         client.addr,
         client.response.file.fd,
@@ -965,7 +965,7 @@ fn onWriteResponseBuffer(ctx: *Server, client: *Client, cqe: io_uring_cqe) !void
         return;
     }
 
-    logger.debug("ctx#{d:<4} addr={s} HANDLE WRITE RESPONSE done", .{
+    logger.debug("ctx#{d:<4} addr={s} ON WRITE RESPONSE done", .{
         ctx.id,
         client.addr,
     });
