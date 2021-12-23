@@ -15,9 +15,7 @@ const IO_Uring = std.os.linux.IO_Uring;
 const io_uring_cqe = std.os.linux.io_uring_cqe;
 const io_uring_sqe = std.os.linux.io_uring_sqe;
 
-const c = @cImport({
-    @cInclude("picohttpparser.h");
-});
+const http = @import("http.zig");
 
 const max_ring_entries = 512;
 const max_buffer_size = 4096;
@@ -25,95 +23,6 @@ const max_connections = 128;
 const max_serve_threads = 8;
 
 const logger = std.log.scoped(.main);
-
-pub const StatusCode = enum(u16) {
-    OK = @as(u16, 200),
-};
-
-pub const Header = struct {
-    name: []const u8,
-    value: []const u8,
-};
-
-/// Request type contains fields populated by picohttpparser and provides
-/// helpers methods for easier use with Zig.
-pub const Request = struct {
-    const Self = @This();
-
-    const max_headers = 100;
-
-    method: [*c]u8 = undefined,
-    method_len: usize = undefined,
-    path: [*c]u8 = undefined,
-    path_len: usize = undefined,
-    minor_version: c_int = 0,
-    headers: [max_headers]c.phr_header = undefined,
-    num_headers: usize = max_headers,
-
-    pub fn getMethod(self: Self) []const u8 {
-        return self.method[0..self.method_len];
-    }
-
-    pub fn getPath(self: Self) []const u8 {
-        return self.path[0..self.path_len];
-    }
-
-    pub fn getMinorVersion(self: Self) usize {
-        return @intCast(usize, self.minor_version);
-    }
-
-    pub fn iterateHeaders(self: Self, comptime f: anytype) blk: {
-        const ReturnType = @typeInfo(@TypeOf(f)).Fn.return_type.?;
-        break :blk ReturnType;
-    } {
-        var i: usize = 0;
-        while (i < self.num_headers) : (i += 1) {
-            const hdr = self.headers[i];
-
-            const name = hdr.name[0..hdr.name_len];
-            const value = hdr.value[0..hdr.value_len];
-
-            const result_or_null = try @call(.{}, f, .{ name, value });
-            if (result_or_null) |result| {
-                return result;
-            }
-        }
-        return null;
-    }
-};
-
-pub const ParseRequestResult = struct {
-    req: Request,
-    consumed: usize,
-};
-
-pub fn parseRequest(previous_buffer_len: usize, buffer: []const u8) !?ParseRequestResult {
-    var req = Request{};
-
-    const res = c.phr_parse_request(
-        buffer.ptr,
-        buffer.len,
-        &req.method,
-        &req.method_len,
-        &req.path,
-        &req.path_len,
-        &req.minor_version,
-        &req.headers,
-        &req.num_headers,
-        previous_buffer_len,
-    );
-    if (res == -1) {
-        std.debug.panic("parse error\n", .{});
-    }
-    if (res == -2) {
-        return null;
-    }
-
-    return ParseRequestResult{
-        .req = req,
-        .consumed = @intCast(usize, res),
-    };
-}
 
 /// Creates a server socket, bind it and listen on it.
 ///
@@ -687,7 +596,7 @@ const Client = struct {
     const Response = struct {
         written: usize = 0,
 
-        status_code: StatusCode = .OK,
+        status_code: http.StatusCode = .OK,
 
         file: struct {
             path: [:0]u8 = undefined,
@@ -715,7 +624,7 @@ const Client = struct {
     buffer: std.ArrayList(u8),
 
     request: struct {
-        result: ParseRequestResult = undefined,
+        result: http.ParseRequestResult = undefined,
         body: []const u8 = "",
         content_length: ?usize = null,
     } = .{},
@@ -778,7 +687,7 @@ fn onReadRequest(ctx: *Server, client: *Client, cqe: io_uring_cqe) !void {
     const previous_len = client.buffer.items.len;
     try client.buffer.appendSlice(client.temp_buffer[0..read]);
 
-    if (try parseRequest(previous_len, client.buffer.items)) |result| {
+    if (try http.parseRequest(previous_len, client.buffer.items)) |result| {
         client.request.result = result;
         try processRequest(ctx, client);
     } else {
