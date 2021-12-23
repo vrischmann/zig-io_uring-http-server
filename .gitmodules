@@ -1,0 +1,4 @@
+[submodule "third_party/curl"]
+	path = third_party/curl
+	url = git@github.com:vrischmann/curl.git
+	branch = zig-tinycurl
