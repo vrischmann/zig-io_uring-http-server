@@ -4,12 +4,12 @@ pub fn build(b: *std.build.Builder) void {
     const target = b.standardTargetOptions(.{});
     const mode = b.standardReleaseOptions();
 
-    const picohttp_flags = switch (mode) {
-        .Debug => &[_][]const u8{},
-        .ReleaseFast, .ReleaseSafe => &[_][]const u8{
+    const picohttp_flags: []const []const u8 = switch (mode) {
+        .Debug => &.{},
+        .ReleaseFast, .ReleaseSafe => &.{
             "-O3",
         },
-        .ReleaseSmall => &[_][]const u8{
+        .ReleaseSmall => &.{
             "-O0",
         },
     };
