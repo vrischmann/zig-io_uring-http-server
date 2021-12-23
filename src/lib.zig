@@ -296,7 +296,9 @@ const CallbackPool = struct {
         // All callbacks must be put back in the pool before deinit is called
         assert(self.count() == max_ring_entries);
 
-        while (self.get()) |item| {
+        var ret = self.free_list;
+        while (ret) |item| {
+            ret = item.next;
             self.allocator.destroy(item);
         }
     }
@@ -312,9 +314,9 @@ const CallbackPool = struct {
         return n;
     }
 
-    /// Returns a ready to use callback or null if none are available.
-    pub fn get(self: *Self) ?*Callback {
-        const ret = self.free_list orelse return null;
+    /// Returns a ready to use callback or an error if none are available.
+    pub fn get(self: *Self) !*Callback {
+        const ret = self.free_list orelse return error.OutOfCallback;
         self.free_list = ret.next;
         ret.next = null;
         return ret;
@@ -517,7 +519,7 @@ pub const Server = struct {
             self.listener.server_fd,
         });
 
-        var tmp = self.callbacks.get() orelse return error.OutOfCallback;
+        var tmp = try self.callbacks.get();
         tmp.initStandalone("submitAccept", onAccept);
 
         return try self.ring.accept(
@@ -532,7 +534,7 @@ pub const Server = struct {
     fn submitAcceptLinkTimeout(self: *Self) !*io_uring_sqe {
         logger.debug("ctx#{d:<4} submitting link timeout", .{self.id});
 
-        var tmp = self.callbacks.get() orelse return error.OutOfCallback;
+        var tmp = try self.callbacks.get();
         tmp.initStandalone("submitAcceptLinkTimeout", onAcceptLinkTimeout);
 
         return self.ring.link_timeout(
@@ -548,7 +550,7 @@ pub const Server = struct {
             fd,
         });
 
-        var tmp = self.callbacks.get() orelse return error.OutOfCallback;
+        var tmp = try self.callbacks.get();
         tmp.initStandalone("submitStandaloneClose", cb);
 
         return self.ring.close(
@@ -564,7 +566,7 @@ pub const Server = struct {
             fd,
         });
 
-        var tmp = self.callbacks.get() orelse return error.OutOfCallback;
+        var tmp = try self.callbacks.get();
         tmp.initClient("submitClose", client, cb);
 
         return self.ring.close(
@@ -1210,7 +1212,7 @@ fn submitRead(ctx: *Server, client: *Client, fd: os.socket_t, offset: u64, cb: f
         offset,
     });
 
-    var tmp = ctx.callbacks.get() orelse return error.OutOfCallback;
+    var tmp = try ctx.callbacks.get();
     tmp.initClient("submitRead", client, cb);
 
     return ctx.ring.read(
@@ -1231,7 +1233,7 @@ fn submitWrite(ctx: *Server, client: *Client, fd: os.fd_t, offset: u64, cb: fn (
         fmt.fmtSliceEscapeLower(client.buffer.items),
     });
 
-    var tmp = ctx.callbacks.get() orelse return error.OutOfCallback;
+    var tmp = try ctx.callbacks.get();
     tmp.initClient("submitWrite", client, cb);
 
     var sqe = try ctx.ring.write(
@@ -1250,7 +1252,7 @@ fn submitOpenFile(ctx: *Server, client: *Client, path: [:0]const u8, flags: u32,
         fmt.fmtSliceEscapeLower(path),
     });
 
-    var tmp = ctx.callbacks.get() orelse return error.OutOfCallback;
+    var tmp = try ctx.callbacks.get();
     tmp.initClient("submitOpenFile", client, cb);
 
     return try ctx.ring.openat(
@@ -1269,7 +1271,7 @@ fn submitStatxFile(ctx: *Server, client: *Client, path: [:0]const u8, flags: u32
         fmt.fmtSliceEscapeLower(path),
     });
 
-    var tmp = ctx.callbacks.get() orelse return error.OutOfCallback;
+    var tmp = try ctx.callbacks.get();
     tmp.initClient("submitStatxFile", client, cb);
 
     var sqe = try ctx.ring.statx(
