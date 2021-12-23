@@ -19,6 +19,7 @@ const TestHarness = struct {
     root_allocator: mem.Allocator,
     arena: heap.ArenaAllocator,
     socket: os.socket_t,
+    running: Atomic(bool) = Atomic(bool).init(true),
     server: lib.Server,
 
     fn create(allocator: mem.Allocator) !*TestHarness {
@@ -48,7 +49,7 @@ const TestHarness = struct {
             .socket = socket,
             .server = undefined,
         };
-        try res.server.init(allocator, 0, socket);
+        try res.server.init(allocator, 0, &res.running, socket);
 
         // Start thread
 
@@ -67,7 +68,7 @@ const TestHarness = struct {
 
     fn deinit(self: *TestHarness) void {
         // Wait for the server to finish
-        self.server.running.store(false, .SeqCst);
+        self.running.store(false, .SeqCst);
         self.server.thread.join();
 
         // Clean up the server

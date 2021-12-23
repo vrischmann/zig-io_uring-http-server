@@ -265,7 +265,8 @@ pub const Server = struct {
     /// the server loop will be running on this thread.
     thread: std.Thread,
     /// indicates is the server should continue running.
-    running: Atomic(bool) = Atomic(bool).init(true),
+    /// This is _not_ owned by the server but by the caller.
+    running: *Atomic(bool),
     /// the number of pending SQEs.
     /// Necessary for drain() to work.
     pending: usize = 0,
@@ -297,11 +298,12 @@ pub const Server = struct {
 
     registered_fds: RegisteredFileDescriptors,
 
-    pub fn init(self: *Self, allocator: mem.Allocator, id: ID, server_fd: os.socket_t) !void {
+    pub fn init(self: *Self, allocator: mem.Allocator, id: ID, running: *Atomic(bool), server_fd: os.socket_t) !void {
         self.* = .{
             .root_allocator = allocator,
             .ring = try std.os.linux.IO_Uring.init(max_ring_entries, 0),
             .id = id,
+            .running = running,
             .thread = undefined,
             .listener = .{
                 .server_fd = server_fd,

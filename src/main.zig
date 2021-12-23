@@ -24,6 +24,41 @@ const max_serve_threads = 8;
 
 const logger = std.log.scoped(.main);
 
+var global_running: Atomic(bool) = Atomic(bool).init(true);
+
+fn addSignalHandlers() void {
+    // Ignore broken pipes
+    {
+        var act = os.Sigaction{
+            .handler = .{
+                .sigaction = os.SIG.IGN,
+            },
+            .mask = os.empty_sigset,
+            .flags = 0,
+        };
+        os.sigaction(os.SIG.PIPE, &act, null);
+    }
+
+    // Catch SIGINT/SIGTERM for proper shutdown
+    {
+        var act = os.Sigaction{
+            .handler = .{
+                .handler = struct {
+                    fn wrapper(sig: c_int) callconv(.C) void {
+                        logger.info("caught signal {d}", .{sig});
+
+                        global_running.store(false, .SeqCst);
+                    }
+                }.wrapper,
+            },
+            .mask = os.empty_sigset,
+            .flags = 0,
+        };
+        os.sigaction(os.SIG.TERM, &act, null);
+        os.sigaction(os.SIG.INT, &act, null);
+    }
+}
+
 pub fn main() anyerror!void {
     var gpa = heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit()) {
@@ -36,15 +71,7 @@ pub fn main() anyerror!void {
     // var allocator = logging_allocator.allocator();
 
     //
-    // Ignore broken pipes
-    var act = os.Sigaction{
-        .handler = .{
-            .sigaction = os.SIG.IGN,
-        },
-        .mask = os.empty_sigset,
-        .flags = 0,
-    };
-    os.sigaction(os.SIG.PIPE, &act, null);
+    addSignalHandlers();
 
     // Create the server socket
     const server_fd = try httpserver.createSocket(3405);
@@ -55,7 +82,7 @@ pub fn main() anyerror!void {
 
     var servers = try allocator.alloc(httpserver.Server, max_serve_threads);
     for (servers) |*server, i| {
-        try server.init(allocator, i, server_fd);
+        try server.init(allocator, i, &global_running, server_fd);
     }
     defer {
         for (servers) |*server| server.deinit();
@@ -67,7 +94,7 @@ pub fn main() anyerror!void {
             .{},
             struct {
                 fn worker(server: *httpserver.Server) !void {
-                    return server.run(30 * time.ns_per_s);
+                    return server.run(1 * time.ns_per_s);
                 }
             }.worker,
             .{v},
