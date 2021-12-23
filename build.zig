@@ -1,6 +1,8 @@
 const std = @import("std");
 
-pub fn build(b: *std.build.Builder) void {
+const TinyCurlBuilder = @import("third_party/curl/TinyCurlBuilder.zig");
+
+pub fn build(b: *std.build.Builder) !void {
     const target = b.standardTargetOptions(.{});
     const mode = b.standardReleaseOptions();
 
@@ -28,12 +30,17 @@ pub fn build(b: *std.build.Builder) void {
     exe.linkLibrary(picohttp);
     exe.install();
 
+    var tinycurl_builder = try TinyCurlBuilder.init(b, "third_party/curl/", target, mode, .{
+        .link_type = .static,
+    });
+
     const tests = b.addTest("src/test.zig");
     tests.addIncludeDir("src");
     tests.setTarget(target);
     tests.setBuildMode(mode);
-    tests.linkSystemLibrary("curl");
     tests.linkLibrary(picohttp);
+    tinycurl_builder.addIncludeDirTo(tests);
+    tinycurl_builder.linkTo(tests);
 
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&tests.step);
