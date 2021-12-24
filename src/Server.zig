@@ -299,7 +299,7 @@ pub fn run(self: *Self, accept_timeout: u63) !void {
         // third step: process all available CQEs.
         //
         // This asks the kernel to wait for at least `submitted` CQE to be available.
-        // Since we successfully submitted that much SQE it is guaranteed we will _at some point_
+        // Since we successfully submitted that many SQEs it is guaranteed we will _at some point_
         // get that many CQEs but there's no guarantee they will be available instantly; if the
         // kernel lags in processing the SQEs we can have a delay in getting the CQEs.
         // This is further accentuated by the number of pending SQEs we can have.
@@ -333,6 +333,10 @@ fn maybeAccept(self: *Self, timeout: u63) !void {
     self.listener.accept_waiting = true;
 }
 
+/// Continuously submit SQEs and process completions until there are
+/// no more pending operations.
+///
+/// This must be called when shutting down.
 fn drain(self: *Self) !void {
     while (self.pending > 0) {
         _ = try self.submit(0);
