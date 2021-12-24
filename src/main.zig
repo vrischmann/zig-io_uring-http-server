@@ -17,9 +17,6 @@ const io_uring_sqe = std.os.linux.io_uring_sqe;
 
 const httpserver = @import("httpserver");
 
-const max_ring_entries = 512;
-const max_buffer_size = 4096;
-const max_connections = 128;
 const max_serve_threads = 8;
 
 const logger = std.log.scoped(.main);
@@ -80,26 +77,31 @@ pub fn main() anyerror!void {
 
     // Create the servers
 
-    var servers = try allocator.alloc(httpserver.Server, max_serve_threads);
-    for (servers) |*server, i| {
-        try server.init(allocator, i, &global_running, server_fd);
+    const ServerWithThread = struct {
+        server: httpserver.Server,
+        thread: std.Thread,
+    };
+
+    var servers = try allocator.alloc(ServerWithThread, max_serve_threads);
+    for (servers) |*item, i| {
+        try item.server.init(allocator, i, &global_running, server_fd);
     }
     defer {
-        for (servers) |*server| server.deinit();
+        for (servers) |*item| item.server.deinit();
         allocator.free(servers);
     }
 
-    for (servers) |*v| {
-        v.thread = try std.Thread.spawn(
+    for (servers) |*item| {
+        item.thread = try std.Thread.spawn(
             .{},
             struct {
                 fn worker(server: *httpserver.Server) !void {
                     return server.run(1 * time.ns_per_s);
                 }
             }.worker,
-            .{v},
+            .{&item.server},
         );
     }
 
-    for (servers) |*v| v.thread.join();
+    for (servers) |*item| item.thread.join();
 }
