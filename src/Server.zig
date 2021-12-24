@@ -250,6 +250,8 @@ registered_fds: RegisteredFileDescriptors,
 ///
 /// `server_fd` must be a socket properly initialized with listen(2) and bind(2) which will be used for accept(2) operations.
 pub fn init(self: *Self, allocator: mem.Allocator, id: ID, running: *Atomic(bool), server_fd: os.socket_t) !void {
+    // TODO(vincent): probe for available features for io_uring ?
+
     self.* = .{
         .root_allocator = allocator,
         .ring = try std.os.linux.IO_Uring.init(max_ring_entries, 0),
