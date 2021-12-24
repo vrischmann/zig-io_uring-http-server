@@ -184,14 +184,12 @@ id: ID,
 /// This is _not_ owned by the server but by the caller.
 running: *Atomic(bool),
 
-/// the number of pending operations.
-///
-/// You might think this could be replaced with ring.sq_ready()/ring.cq_ready() but no;
-/// these tell us what the kernel is yet to consume and what the application is yet to consume but they
-/// don't tell us how many operations are still pending _in the kernel_.
-/// Operations such as accept, timeouts, read etc can be pending completion for some time.
-///
 /// This field lets us keep track of the number of pending operations which is necessary to implement drain() properly.
+///
+/// Note that this is different than the number of SQEs pending in the submission queue or CQEs pending in the completion queue.
+/// For example an accept operation which has been consumed by the kernel but hasn't accepted any connection yet must be considered
+/// pending for us but it's not pending in either the submission or completion queue.
+/// Another example is a timeout: once accepted and until expired it won't be available in the completion queue.
 pending: usize = 0,
 
 /// Listener state
