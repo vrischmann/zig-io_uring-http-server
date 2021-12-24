@@ -311,7 +311,7 @@ pub fn run(self: *Self, accept_timeout: u63) !void {
     try self.drain();
 }
 
-pub fn maybeAccept(self: *Self, timeout: u63) !void {
+fn maybeAccept(self: *Self, timeout: u63) !void {
     if (!self.running.load(.SeqCst)) {
         // we must stop: stop accepting connections.
         return;
@@ -333,20 +333,20 @@ pub fn maybeAccept(self: *Self, timeout: u63) !void {
     self.listener.accept_waiting = true;
 }
 
-pub fn drain(self: *Self) !void {
+fn drain(self: *Self) !void {
     while (self.pending > 0) {
         _ = try self.submit(0);
         _ = try self.processCompletions(self.pending);
     }
 }
 
-pub fn submit(self: *Self, nr: u32) !usize {
+fn submit(self: *Self, nr: u32) !usize {
     const n = try self.ring.submit_and_wait(nr);
     self.pending += n;
     return n;
 }
 
-pub fn processCompletions(self: *Self, wait_nr: usize) !usize {
+fn processCompletions(self: *Self, wait_nr: usize) !usize {
     const cqe_count = try self.ring.copy_cqes(&self.cqes, @intCast(u32, wait_nr));
 
     for (self.cqes[0..cqe_count]) |cqe| {
