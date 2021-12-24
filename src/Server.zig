@@ -305,7 +305,6 @@ pub fn run(self: *Self, accept_timeout: u63) !void {
         // This is further accentuated by the number of pending SQEs we can have.
         //
         // One example would be submitting a lot of fdatasync operations on slow devices.
-        //
         _ = try self.processCompletions(submitted);
     }
     try self.drain();
@@ -338,6 +337,21 @@ fn maybeAccept(self: *Self, timeout: u63) !void {
 ///
 /// This must be called when shutting down.
 fn drain(self: *Self) !void {
+    // This call is only useful if pending > 0.
+    //
+    // It is currently impossible to have pending == 0 after an iteration of the main loop because:
+    // * if no accept waiting maybeAccept `pending` will increase by 2.
+    // * if an accept is waiting but we didn't get a connection, `pending` must still be >= 1.
+    // * if an accept is waiting and we got a connection, the previous processCompletions call
+    //   increased `pending` while doing request processing.
+    // * if no accept waiting and too many connections, the previous processCompletions call
+    //   increased `pending` while doing request processing.
+    //
+    // But to be extra sure we do this submit call outside the drain loop to ensure we have flushed all queued SQEs
+    // submitted in the last processCompletions call in the main loop.
+
+    _ = try self.submit(0);
+
     while (self.pending > 0) {
         _ = try self.submit(0);
         _ = try self.processCompletions(self.pending);
