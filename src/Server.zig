@@ -362,20 +362,39 @@ fn drain(self: *Self) !void {
     }
 }
 
+/// Submits all pending SQE to the kernel, if any.
+/// Waits for `nr` events to be completed before returning (0 means don't wait).
+///
+/// This also increments `pending` by the number of events submitted.
+///
+/// Returns the number of events submitted.
 fn submit(self: *Self, nr: u32) !usize {
     const n = try self.ring.submit_and_wait(nr);
     self.pending += n;
     return n;
 }
 
-fn processCompletions(self: *Self, wait_nr: usize) !usize {
-    const cqe_count = try self.ring.copy_cqes(&self.cqes, @intCast(u32, wait_nr));
+/// Process all ready CQEs, if any.
+/// Waits for `nr` events to be completed before processing begins (0 means don't wait).
+///
+/// This also decrements `pending` by the number of events processed.
+///
+/// Returnsd the number of events processed.
+fn processCompletions(self: *Self, nr: usize) !usize {
+    const cqe_count = try self.ring.copy_cqes(&self.cqes, @intCast(u32, nr));
 
     for (self.cqes[0..cqe_count]) |cqe| {
         debug.assert(cqe.user_data != 0);
 
+        // We know that a SQE/CQE is _always_ associated with a pointer of type Callback.
+
         var cb = @intToPtr(*Callback, cqe.user_data);
         defer self.callbacks.put(cb);
+
+        // Call the provided function with the proper context.
+        //
+        // Note that while the callback function signature can return an error we don't bubble them up
+        // simply because we can't shutdown the server due to a processing error.
 
         switch (cb.kind) {
             .client => |client_cb| {
