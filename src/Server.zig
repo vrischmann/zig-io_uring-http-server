@@ -381,6 +381,7 @@ fn submit(self: *Self, nr: u32) !usize {
 ///
 /// Returnsd the number of events processed.
 fn processCompletions(self: *Self, nr: usize) !usize {
+    // TODO(vincent): how should we handle EAGAIN and EINTR ? right now they will shutdown the server.
     const cqe_count = try self.ring.copy_cqes(&self.cqes, @intCast(u32, nr));
 
     for (self.cqes[0..cqe_count]) |cqe| {
