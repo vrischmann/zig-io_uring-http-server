@@ -621,7 +621,7 @@ fn onWriteResponseBuffer(self: *Self, client: *ClientState, cqe: io_uring_cqe) !
         // Remove the already written data
         try client.buffer.replaceRange(0, written, &[0]u8{});
 
-        try self.submitWrite(client, client.fd, 0, onWriteResponseBuffer);
+        _ = try self.submitWrite(client, client.fd, 0, onWriteResponseBuffer);
         return;
     }
 
@@ -684,7 +684,7 @@ fn onWriteResponseFile(self: *Self, client: *ClientState, cqe: io_uring_cqe) !vo
         // Remove the already written data
         try client.buffer.replaceRange(0, written, &[0]u8{});
 
-        try self.submitWrite(client, client.fd, 0, onWriteResponseFile);
+        _ = try self.submitWrite(client, client.fd, 0, onWriteResponseFile);
         return;
     }
 
@@ -747,7 +747,7 @@ fn onReadResponseFile(self: *Self, client: *ClientState, cqe: io_uring_cqe) !voi
 
     try client.buffer.appendSlice(client.temp_buffer[0..read]);
 
-    try self.submitWrite(client, client.fd, 0, onWriteResponseFile);
+    _ = try self.submitWrite(client, client.fd, 0, onWriteResponseFile);
 }
 
 fn onStatxResponseFile(self: *Self, client: *ClientState, cqe: io_uring_cqe) !void {
@@ -800,8 +800,6 @@ fn onStatxResponseFile(self: *Self, client: *ClientState, cqe: io_uring_cqe) !vo
 }
 
 fn onReadBody(self: *Self, client: *ClientState, cqe: io_uring_cqe) !void {
-    _ = self;
-
     switch (cqe.err()) {
         .SUCCESS => {},
         .PIPE => {
@@ -847,8 +845,6 @@ fn onReadBody(self: *Self, client: *ClientState, cqe: io_uring_cqe) !void {
 
 fn onOpenResponseFile(self: *Self, client: *ClientState, cqe: io_uring_cqe) !void {
     debug.assert(client.buffer.items.len == 0);
-
-    _ = self;
 
     switch (cqe.err()) {
         .SUCCESS => {},
@@ -976,7 +972,7 @@ fn submitWriteNotFound(self: *Self, client: *ClientState) !void {
 
     client.setBuffer(static_response);
 
-    try self.submitWrite(client, client.fd, 0, onWriteResponseBuffer);
+    _ = try self.submitWrite(client, client.fd, 0, onWriteResponseBuffer);
 }
 
 fn processRequestWithBody(self: *Self, client: *ClientState) !void {
@@ -993,7 +989,7 @@ fn processRequestWithBody(self: *Self, client: *ClientState) !void {
 
     client.setBuffer(static_response);
 
-    try self.submitWrite(client, client.fd, 0, onWriteResponseBuffer);
+    _ = try self.submitWrite(client, client.fd, 0, onWriteResponseBuffer);
 }
 
 fn processRequest(self: *Self, client: *ClientState) !void {
@@ -1064,7 +1060,7 @@ fn processRequest(self: *Self, client: *ClientState) !void {
         );
         sqe.flags |= os.linux.IOSQE_IO_LINK;
 
-        try self.submitStatxFile(
+        _ = try self.submitStatxFile(
             client,
             client.response.file.path,
             os.linux.AT.SYMLINK_NOFOLLOW,
@@ -1072,7 +1068,6 @@ fn processRequest(self: *Self, client: *ClientState) !void {
             &client.response.file.statx_buf,
             onStatxResponseFile,
         );
-
         return;
     }
 
@@ -1082,7 +1077,7 @@ fn processRequest(self: *Self, client: *ClientState) !void {
 
     client.setBuffer(static_response);
 
-    try self.submitWrite(client, client.fd, 0, onWriteResponseBuffer);
+    _ = try self.submitWrite(client, client.fd, 0, onWriteResponseBuffer);
 }
 
 fn submitRead(self: *Self, client: *ClientState, fd: os.socket_t, offset: u64, cb: Callback.ClientFn) !*io_uring_sqe {
@@ -1104,7 +1099,7 @@ fn submitRead(self: *Self, client: *ClientState, fd: os.socket_t, offset: u64, c
     );
 }
 
-fn submitWrite(self: *Self, client: *ClientState, fd: os.fd_t, offset: u64, cb: Callback.ClientFn) !void {
+fn submitWrite(self: *Self, client: *ClientState, fd: os.fd_t, offset: u64, cb: Callback.ClientFn) !*io_uring_sqe {
     logger.debug("ctx#{d:<4} addr={s} submitting write of {s} to {d}, offset {d}, data=\"{s}\"", .{
         self.id,
         client.addr,
@@ -1117,13 +1112,12 @@ fn submitWrite(self: *Self, client: *ClientState, fd: os.fd_t, offset: u64, cb: 
     var tmp = try self.callbacks.get();
     tmp.initClient("submitWrite", client, cb);
 
-    var sqe = try self.ring.write(
+    return self.ring.write(
         @ptrToInt(tmp),
         fd,
         client.buffer.items,
         offset,
     );
-    _ = sqe;
 }
 
 fn submitOpenFile(self: *Self, client: *ClientState, path: [:0]const u8, flags: u32, mode: os.mode_t, cb: Callback.ClientFn) !*io_uring_sqe {
@@ -1145,7 +1139,7 @@ fn submitOpenFile(self: *Self, client: *ClientState, path: [:0]const u8, flags: 
     );
 }
 
-fn submitStatxFile(self: *Self, client: *ClientState, path: [:0]const u8, flags: u32, mask: u32, buf: *os.linux.Statx, cb: Callback.ClientFn) !void {
+fn submitStatxFile(self: *Self, client: *ClientState, path: [:0]const u8, flags: u32, mask: u32, buf: *os.linux.Statx, cb: Callback.ClientFn) !*io_uring_sqe {
     logger.debug("ctx#{d:<4} addr={s} submitting statx, path=\"{s}\"", .{
         self.id,
         client.addr,
@@ -1155,7 +1149,7 @@ fn submitStatxFile(self: *Self, client: *ClientState, path: [:0]const u8, flags:
     var tmp = try self.callbacks.get();
     tmp.initClient("submitStatxFile", client, cb);
 
-    var sqe = try self.ring.statx(
+    return self.ring.statx(
         @ptrToInt(tmp),
         os.linux.AT.FDCWD,
         path,
@@ -1163,5 +1157,4 @@ fn submitStatxFile(self: *Self, client: *ClientState, path: [:0]const u8, flags:
         mask,
         buf,
     );
-    _ = sqe;
 }
