@@ -153,9 +153,37 @@ pub const StatusCode = enum(u10) {
     }
 };
 
-const Header = struct {
+pub const Header = struct {
     name: []const u8,
     value: []const u8,
+};
+
+pub const Headers = struct {
+    storage: [RawRequest.max_headers]Header,
+    view: []Header,
+
+    fn create(req: RawRequest) !Headers {
+        assert(req.num_headers < RawRequest.max_headers);
+
+        var res = Headers{
+            .storage = undefined,
+            .view = undefined,
+        };
+
+        const num_headers = req.copyHeaders(&res.storage);
+        res.view = res.storage[0..num_headers];
+
+        return res;
+    }
+
+    pub fn get(self: Headers, name: []const u8) ?Header {
+        for (self.view) |item| {
+            if (ascii.eqlIgnoreCase(name, item.name)) {
+                return item;
+            }
+        }
+        return null;
+    }
 };
 
 /// Request type contains fields populated by picohttpparser and provides
@@ -185,7 +213,7 @@ const RawRequest = struct {
         return @intCast(usize, self.minor_version);
     }
 
-    fn copyHeaders(self: Self, headers: []Header) void {
+    fn copyHeaders(self: Self, headers: []Header) usize {
         assert(headers.len >= self.num_headers);
 
         var i: usize = 0;
@@ -198,6 +226,8 @@ const RawRequest = struct {
             headers[i].name = name;
             headers[i].value = value;
         }
+
+        return self.num_headers;
     }
 
     fn getContentLength(self: Self) !?usize {
@@ -267,23 +297,20 @@ pub const HandlerAction = union(enum) {
 };
 
 pub const Request = struct {
-    method: []const u8,
+    method: Method,
     path: []const u8,
     minor_version: usize,
-    headers: [RawRequest.max_headers]Header,
+    headers: Headers,
     body: ?[]const u8,
 
-    fn create(req: RawRequest, body: ?[]const u8) Request {
-        var res = Request{
-            .method = req.getMethod(),
+    fn create(req: RawRequest, body: ?[]const u8) !Request {
+        return Request{
+            .method = try Method.fromString(req.getMethod()),
             .path = req.getPath(),
             .minor_version = req.getMinorVersion(),
-            .headers = undefined,
+            .headers = try Headers.create(req),
             .body = body,
         };
-        req.copyHeaders(&res.headers);
-
-        return res;
     }
 };
 
@@ -1320,7 +1347,7 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn callHandler(self: *Self, client: *ClientState) !void {
-            const req = Request.create(
+            const req = try Request.create(
                 client.request_state.parse_result.raw_request,
                 client.request_state.body,
             );
