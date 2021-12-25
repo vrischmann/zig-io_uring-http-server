@@ -30,8 +30,76 @@ const c = @cImport({
 });
 
 pub const StatusCode = enum(u16) {
+    // informational
+    continue_ = 100,
+    switching_protocols = 101,
+
+    // success
     ok = 200,
+    created = 201,
+    accepted = 202,
+    no_content = 204,
+    partial_content = 206,
+
+    // redirection
+    moved_permanently = 301,
+    found = 302,
+    not_modified = 304,
+    temporary_redirect = 307,
+    permanent_redirect = 308,
+
+    // client error
+    bad_request = 400,
+    unauthorized = 401,
+    forbidden = 403,
     not_found = 404,
+    method_not_allowed = 405,
+    not_acceptable = 406,
+    gone = 410,
+    too_many_requests = 429,
+
+    // server error
+    internal_server_error = 500,
+    bad_gateway = 502,
+    service_unavailable = 503,
+    gateway_timeout = 504,
+
+    pub fn toString(self: StatusCode) []const u8 {
+        switch (self) {
+            // informational
+            .continue_ => return "Continue",
+            .switching_protocols => return "Switching Protocols",
+
+            .ok => return "OK",
+            .created => return "Created",
+            .accepted => return "Accepted",
+            .no_content => return "No Content",
+            .partial_content => return "Partial Content",
+
+            // redirection
+            .moved_permanently => return "Moved Permanently",
+            .found => return "Found",
+            .not_modified => return "Not Modified",
+            .temporary_redirect => return "Temporary Redirected",
+            .permanent_redirect => return "Permanent Redirect",
+
+            // client error
+            .bad_request => return "Bad Request",
+            .unauthorized => return "Unauthorized",
+            .forbidden => return "Forbidden",
+            .not_found => return "Not Found",
+            .method_not_allowed => return "Method Not Allowed",
+            .not_acceptable => return "Not Acceptable",
+            .gone => return "Gone",
+            .too_many_requests => return "Too Many Requests",
+
+            // server error
+            .internal_server_error => return "Internal Server Error",
+            .bad_gateway => return "Bad Gateway",
+            .service_unavailable => return "Service Unavailable",
+            .gateway_timeout => return "Gateway Timeout",
+        }
+    }
 };
 
 const Header = struct {
