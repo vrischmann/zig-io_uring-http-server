@@ -332,6 +332,8 @@ const ClientState = struct {
             .consumed = 0,
         },
         content_length: ?usize = null,
+        /// this is a view into the client buffer
+        body: ?[]const u8 = null,
     };
 
     const ResponseState = struct {
@@ -400,6 +402,13 @@ const ClientState = struct {
         self.buffer.items = self.buffer.items[0..data.len];
 
         mem.copy(u8, self.buffer.items, data);
+    }
+
+    fn refreshBody(self: *ClientState) void {
+        const consumed = self.request_state.parse_result.consumed;
+        if (consumed > 0) {
+            self.request_state.body = self.buffer.items[consumed..];
+        }
     }
 };
 
@@ -1095,6 +1104,9 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn onReadBody(self: *Self, client: *ClientState, cqe: io_uring_cqe) !void {
+            assert(client.request_state.content_length != null);
+            assert(client.request_state.body != null);
+
             switch (cqe.err()) {
                 .SUCCESS => {},
                 .PIPE => {
@@ -1119,14 +1131,16 @@ pub fn Server(comptime Context: type) type {
             logger.debug("ctx#{d:<4} addr={s} ON READ BODY read of {d} bytes succeeded", .{ self.id, client.peer.addr, read });
 
             try client.buffer.appendSlice(client.temp_buffer[0..read]);
+            client.refreshBody();
 
             const content_length = client.request_state.content_length.?;
+            const body = client.request_state.body.?;
 
-            if (client.buffer.items.len < content_length) {
+            if (body.len < content_length) {
                 logger.debug("ctx#{d:<4} addr={s} buffer len={d} bytes, content length={d} bytes", .{
                     self.id,
                     client.peer.addr,
-                    client.buffer.items.len,
+                    body.len,
                     content_length,
                 });
 
@@ -1187,14 +1201,9 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn callHandler(self: *Self, client: *ClientState) !void {
-            const body: ?[]const u8 = if (client.request_state.content_length != null)
-                client.buffer.items
-            else
-                null;
-
             const req = Request.create(
                 client.request_state.parse_result.raw_request,
-                body,
+                client.request_state.body,
             );
 
             const action = try self.handler(self.user_context, client.peer, req);
@@ -1248,18 +1257,16 @@ pub fn Server(comptime Context: type) type {
             if (content_length) |n| {
                 logger.debug("ctx#{d:<4} addr={s} content length: {d}", .{ self.id, client.peer.addr, content_length });
 
-                try client.buffer.replaceRange(0, client.request_state.parse_result.consumed, &[0]u8{});
+                client.request_state.content_length = n;
+                client.refreshBody();
 
-                if (n > client.buffer.items.len) {
-                    logger.debug("ctx#{d:<4} addr={s} body incomplete, usable={d} bytes, body data=\"{s}\", content length: {d} bytes", .{
+                if (client.request_state.body) |body| {
+                    logger.debug("ctx#{d:<4} addr={s} body incomplete, usable={d} bytes, content length: {d} bytes", .{
                         self.id,
                         client.peer.addr,
-                        client.buffer.items.len,
-                        fmt.fmtSliceEscapeLower(client.buffer.items),
+                        body.len,
                         n,
                     });
-
-                    client.request_state.content_length = n;
 
                     _ = try self.submitRead(client, client.fd, 0, onReadBody);
                     return;
