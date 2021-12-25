@@ -108,7 +108,11 @@ test "GET 200 OK" {
                     _ = peer;
                     _ = req;
 
-                    try testing.expectEqualStrings("GET", req.method);
+                    try testing.expectEqual(httpserver.Method.get, req.method);
+                    try testing.expect(req.headers.get("Host") != null);
+                    try testing.expectEqualStrings("*/*", req.headers.get("Accept").?.value);
+                    try testing.expect(req.headers.get("Content-Length") == null);
+                    try testing.expect(req.headers.get("Content-Type") == null);
                     try testing.expect(req.body == null);
 
                     return httpserver.HandlerAction{
@@ -147,7 +151,11 @@ test "POST 200 OK" {
                 _ = peer;
                 _ = req;
 
-                try testing.expectEqualStrings("POST", req.method);
+                try testing.expectEqual(httpserver.Method.post, req.method);
+                try testing.expect(req.headers.get("Host") != null);
+                try testing.expectEqualStrings("*/*", req.headers.get("Accept").?.value);
+                try testing.expectEqualStrings("application/json", req.headers.get("Content-Type").?.value);
+                try testing.expectEqual(body.len, try fmt.parseInt(usize, req.headers.get("Content-Length").?.value, 10));
                 try testing.expectEqualStrings(body, req.body.?);
 
                 return httpserver.HandlerAction{
