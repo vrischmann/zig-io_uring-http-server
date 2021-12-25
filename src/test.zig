@@ -108,6 +108,7 @@ test "GET 200 OK" {
                     _ = peer;
                     _ = req;
 
+                    try testing.expectEqualStrings("/plaintext", req.path);
                     try testing.expectEqual(httpserver.Method.get, req.method);
                     try testing.expect(req.headers.get("Host") != null);
                     try testing.expectEqualStrings("*/*", req.headers.get("Accept").?.value);
@@ -151,6 +152,7 @@ test "POST 200 OK" {
                 _ = peer;
                 _ = req;
 
+                try testing.expectEqualStrings("/foobar", req.path);
                 try testing.expectEqual(httpserver.Method.post, req.method);
                 try testing.expect(req.headers.get("Host") != null);
                 try testing.expectEqualStrings("*/*", req.headers.get("Accept").?.value);
@@ -191,8 +193,12 @@ test "GET files" {
                 _ = peer;
                 _ = req;
 
-                try testing.expect(req.body == null);
                 try testing.expect(mem.startsWith(u8, req.path, "/static"));
+                try testing.expect(req.headers.get("Host") != null);
+                try testing.expectEqualStrings("*/*", req.headers.get("Accept").?.value);
+                try testing.expect(req.headers.get("Content-Length") == null);
+                try testing.expect(req.headers.get("Content-Type") == null);
+                try testing.expect(req.body == null);
 
                 const path = req.path[1..];
 
