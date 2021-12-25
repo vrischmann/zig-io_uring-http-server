@@ -29,6 +29,7 @@ pub fn build(b: *std.build.Builder) void {
     exe.install();
 
     const tests = b.addTest("src/test.zig");
+    tests.addPackagePath("httpserver", "src/lib.zig");
     tests.addIncludeDir("src");
     tests.setTarget(target);
     tests.setBuildMode(mode);
