@@ -1,4 +1,5 @@
 const std = @import("std");
+const ascii = std.ascii;
 const debug = std.debug;
 const fmt = std.fmt;
 const heap = std.heap;
@@ -29,14 +30,160 @@ const c = @cImport({
     @cInclude("picohttpparser.h");
 });
 
-pub const StatusCode = enum(u16) {
-    ok = 200,
-    not_found = 404,
+pub const Method = enum(u4) {
+    get,
+    head,
+    post,
+    put,
+    delete,
+    connect,
+    options,
+    trace,
+    patch,
+
+    pub fn toString(self: Method) []const u8 {
+        switch (self) {
+            .get => return "GET",
+            .head => return "HEAD",
+            .post => return "POST",
+            .put => return "PUT",
+            .delete => return "DELETE",
+            .connect => return "CONNECT",
+            .options => return "OPTIONS",
+            .trace => return "TRACE",
+            .patch => return "PATCH",
+        }
+    }
+
+    fn fromString(s: []const u8) !Method {
+        if (ascii.eqlIgnoreCase(s, "GET")) {
+            return .get;
+        } else if (ascii.eqlIgnoreCase(s, "HEAD")) {
+            return .head;
+        } else if (ascii.eqlIgnoreCase(s, "POST")) {
+            return .post;
+        } else if (ascii.eqlIgnoreCase(s, "PUT")) {
+            return .put;
+        } else if (ascii.eqlIgnoreCase(s, "DELETE")) {
+            return .delete;
+        } else if (ascii.eqlIgnoreCase(s, "CONNECT")) {
+            return .connect;
+        } else if (ascii.eqlIgnoreCase(s, "OPTIONS")) {
+            return .options;
+        } else if (ascii.eqlIgnoreCase(s, "TRACE")) {
+            return .trace;
+        } else if (ascii.eqlIgnoreCase(s, "PATCH")) {
+            return .patch;
+        } else {
+            return error.InvalidMethod;
+        }
+    }
 };
 
-const Header = struct {
+pub const StatusCode = enum(u10) {
+    // informational
+    continue_ = 100,
+    switching_protocols = 101,
+
+    // success
+    ok = 200,
+    created = 201,
+    accepted = 202,
+    no_content = 204,
+    partial_content = 206,
+
+    // redirection
+    moved_permanently = 301,
+    found = 302,
+    not_modified = 304,
+    temporary_redirect = 307,
+    permanent_redirect = 308,
+
+    // client error
+    bad_request = 400,
+    unauthorized = 401,
+    forbidden = 403,
+    not_found = 404,
+    method_not_allowed = 405,
+    not_acceptable = 406,
+    gone = 410,
+    too_many_requests = 429,
+
+    // server error
+    internal_server_error = 500,
+    bad_gateway = 502,
+    service_unavailable = 503,
+    gateway_timeout = 504,
+
+    pub fn toString(self: StatusCode) []const u8 {
+        switch (self) {
+            // informational
+            .continue_ => return "Continue",
+            .switching_protocols => return "Switching Protocols",
+
+            .ok => return "OK",
+            .created => return "Created",
+            .accepted => return "Accepted",
+            .no_content => return "No Content",
+            .partial_content => return "Partial Content",
+
+            // redirection
+            .moved_permanently => return "Moved Permanently",
+            .found => return "Found",
+            .not_modified => return "Not Modified",
+            .temporary_redirect => return "Temporary Redirected",
+            .permanent_redirect => return "Permanent Redirect",
+
+            // client error
+            .bad_request => return "Bad Request",
+            .unauthorized => return "Unauthorized",
+            .forbidden => return "Forbidden",
+            .not_found => return "Not Found",
+            .method_not_allowed => return "Method Not Allowed",
+            .not_acceptable => return "Not Acceptable",
+            .gone => return "Gone",
+            .too_many_requests => return "Too Many Requests",
+
+            // server error
+            .internal_server_error => return "Internal Server Error",
+            .bad_gateway => return "Bad Gateway",
+            .service_unavailable => return "Service Unavailable",
+            .gateway_timeout => return "Gateway Timeout",
+        }
+    }
+};
+
+pub const Header = struct {
     name: []const u8,
     value: []const u8,
+};
+
+pub const Headers = struct {
+    storage: [RawRequest.max_headers]Header,
+    view: []Header,
+
+    fn create(req: RawRequest) !Headers {
+        assert(req.num_headers < RawRequest.max_headers);
+
+        var res = Headers{
+            .storage = undefined,
+            .view = undefined,
+        };
+
+        const num_headers = req.copyHeaders(&res.storage);
+        res.view = res.storage[0..num_headers];
+
+        return res;
+    }
+
+    pub fn get(self: Headers, name: []const u8) ?Header {
+        for (self.view) |item| {
+            if (ascii.eqlIgnoreCase(name, item.name)) {
+                return item;
+            }
+        }
+        return null;
+    }
 };
 
 /// Request type contains fields populated by picohttpparser and provides
@@ -66,7 +213,7 @@ const RawRequest = struct {
         return @intCast(usize, self.minor_version);
     }
 
-    fn copyHeaders(self: Self, headers: []Header) void {
+    fn copyHeaders(self: Self, headers: []Header) usize {
         assert(headers.len >= self.num_headers);
 
         var i: usize = 0;
@@ -79,6 +226,8 @@ const RawRequest = struct {
             headers[i].name = name;
             headers[i].value = value;
         }
+
+        return self.num_headers;
     }
 
     fn getContentLength(self: Self) !?usize {
@@ -148,23 +297,20 @@ pub const HandlerAction = union(enum) {
 };
 
 pub const Request = struct {
-    method: []const u8,
+    method: Method,
     path: []const u8,
     minor_version: usize,
-    headers: [RawRequest.max_headers]Header,
+    headers: Headers,
     body: ?[]const u8,
 
-    fn create(req: RawRequest, body: ?[]const u8) Request {
-        var res = Request{
-            .method = req.getMethod(),
+    fn create(req: RawRequest, body: ?[]const u8) !Request {
+        return Request{
+            .method = try Method.fromString(req.getMethod()),
             .path = req.getPath(),
             .minor_version = req.getMinorVersion(),
-            .headers = undefined,
+            .headers = try Headers.create(req),
             .body = body,
         };
-        req.copyHeaders(&res.headers);
-
-        return res;
     }
 };
 
@@ -1201,7 +1347,7 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn callHandler(self: *Self, client: *ClientState) !void {
-            const req = Request.create(
+            const req = try Request.create(
                 client.request_state.parse_result.raw_request,
                 client.request_state.body,
             );
