@@ -108,6 +108,7 @@ test "GET 200 OK" {
                     _ = peer;
                     _ = req;
 
+                    try testing.expectEqualStrings("GET", req.method);
                     try testing.expect(req.body == null);
 
                     return httpserver.HandlerAction{
@@ -146,7 +147,7 @@ test "POST 200 OK" {
                 _ = peer;
                 _ = req;
 
-                try testing.expect(req.body != null);
+                try testing.expectEqualStrings("POST", req.method);
                 try testing.expectEqualStrings(body, req.body.?);
 
                 return httpserver.HandlerAction{
