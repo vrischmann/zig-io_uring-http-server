@@ -11,19 +11,21 @@ const Atomic = std.atomic.Atomic;
 const assert = std.debug.assert;
 
 const curl = @import("curl.zig");
-const lib = @import("lib.zig");
+const httpserver = @import("httpserver");
 
 const port = 34450;
 
 const TestHarness = struct {
+    const Self = @This();
+
     root_allocator: mem.Allocator,
     arena: heap.ArenaAllocator,
     socket: os.socket_t,
     running: Atomic(bool) = Atomic(bool).init(true),
-    server: lib.Server,
+    server: httpserver.Server(*Self),
     thread: std.Thread,
 
-    fn create(allocator: mem.Allocator) !*TestHarness {
+    fn create(allocator: mem.Allocator, comptime handler: httpserver.RequestHandler(*Self)) !*TestHarness {
         const socket = blk: {
             const sockfd = try os.socket(os.AF.INET6, os.SOCK.STREAM, 0);
             errdefer os.close(sockfd);
@@ -51,14 +53,14 @@ const TestHarness = struct {
             .server = undefined,
             .thread = undefined,
         };
-        try res.server.init(allocator, 0, &res.running, socket);
+        try res.server.init(allocator, 0, &res.running, socket, res, handler);
 
         // Start thread
 
         res.thread = try std.Thread.spawn(
             .{},
             struct {
-                fn worker(server: *lib.Server) !void {
+                fn worker(server: *httpserver.Server(*Self)) !void {
                     return server.run(10 * time.ns_per_ms);
                 }
             }.worker,
@@ -98,7 +100,25 @@ test "GET 200 OK" {
 
     var i: usize = 1;
     while (i < 20) : (i += 1) {
-        var th = try TestHarness.create(testing.allocator);
+        var th = try TestHarness.create(
+            testing.allocator,
+            struct {
+                fn handle(ctx: *TestHarness, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.HandlerAction {
+                    _ = ctx;
+                    _ = peer;
+                    _ = req;
+
+                    try testing.expect(req.body == null);
+
+                    return httpserver.HandlerAction{
+                        .respond = .{
+                            .status_code = .ok,
+                            .data = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!",
+                        },
+                    };
+                }
+            }.handle,
+        );
         defer th.deinit();
 
         var j: usize = 0;
@@ -113,26 +133,69 @@ test "GET 200 OK" {
 }
 
 test "POST 200 OK" {
-    var th = try TestHarness.create(testing.allocator);
-    defer th.deinit();
-
     const body =
         \\Perspiciatis eligendi aspernatur iste delectus et et quo repudiandae. Iusto repellat tempora nisi alias. Autem inventore rerum magnam sunt voluptatem aspernatur.
         \\Consequuntur quae non fugit dignissimos at quis. Mollitia nisi minus voluptatem voluptatem sed sunt dolore. Expedita ullam ut ex voluptatem delectus. Fuga quos asperiores consequatur similique voluptatem provident vel. Repudiandae rerum quia dolorem totam.
     ;
 
-    var i: usize = 0;
-    while (i < 2) : (i += 1) {
-        var resp = try th.do("POST", "/foobar", body);
-        defer resp.deinit();
+    var th = try TestHarness.create(
+        testing.allocator,
+        struct {
+            fn handle(ctx: *TestHarness, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.HandlerAction {
+                _ = ctx;
+                _ = peer;
+                _ = req;
 
-        try testing.expectEqual(@as(usize, 200), resp.response_code);
-        try testing.expectEqualStrings("Hello, World!", resp.data);
+                try testing.expect(req.body != null);
+                try testing.expectEqualStrings(body, req.body.?);
+
+                return httpserver.HandlerAction{
+                    .respond = .{
+                        .status_code = .ok,
+                        .data = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!",
+                    },
+                };
+            }
+        }.handle,
+    );
+    defer th.deinit();
+
+    var i: usize = 1;
+    while (i < 20) : (i += 1) {
+        var j: usize = 0;
+        while (j < i) : (j += 1) {
+            var resp = try th.do("POST", "/foobar", body);
+            defer resp.deinit();
+
+            try testing.expectEqual(@as(usize, 200), resp.response_code);
+            try testing.expectEqualStrings("Hello, World!", resp.data);
+        }
     }
 }
 
 test "GET files" {
-    var th = try TestHarness.create(testing.allocator);
+    var th = try TestHarness.create(
+        testing.allocator,
+        struct {
+            fn handle(ctx: *TestHarness, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.HandlerAction {
+                _ = ctx;
+                _ = peer;
+                _ = req;
+
+                try testing.expect(req.body == null);
+                try testing.expect(mem.startsWith(u8, req.path, "/static"));
+
+                const path = req.path[1..];
+
+                return httpserver.HandlerAction{
+                    .send_file = .{
+                        .status_code = .ok,
+                        .path = path,
+                    },
+                };
+            }
+        }.handle,
+    );
     defer th.deinit();
 
     const test_cases = &[_]struct {

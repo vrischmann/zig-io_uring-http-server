@@ -17,7 +17,7 @@ const io_uring_sqe = std.os.linux.io_uring_sqe;
 
 const httpserver = @import("httpserver");
 
-const max_serve_threads = 8;
+const max_serve_threads = 1;
 
 const logger = std.log.scoped(.main);
 
@@ -78,13 +78,40 @@ pub fn main() anyerror!void {
     // Create the servers
 
     const ServerWithThread = struct {
-        server: httpserver.Server,
+        server: httpserver.Server(usize),
         thread: std.Thread,
     };
 
     var servers = try allocator.alloc(ServerWithThread, max_serve_threads);
     for (servers) |*item, i| {
-        try item.server.init(allocator, i, &global_running, server_fd);
+        try item.server.init(
+            allocator,
+            i,
+            &global_running,
+            server_fd,
+            i,
+            struct {
+                fn handle(ctx: usize, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.HandlerAction {
+                    _ = ctx;
+
+                    logger.debug("ctx#{d:<4} IN HANDLER addr={s} method: {s}, path: {s}, minor version: {d}, body: \"{s}\"", .{
+                        ctx,
+                        peer.addr,
+                        req.method,
+                        req.path,
+                        req.minor_version,
+                        req.body,
+                    });
+
+                    return httpserver.HandlerAction{
+                        .respond = .{
+                            .status_code = .ok,
+                            .data = "HTTP/1.1 200 OK\r\nContent-Length: 24\r\n\r\nHello, World in handler!",
+                        },
+                    };
+                }
+            }.handle,
+        );
     }
     defer {
         for (servers) |*item| item.server.deinit();
@@ -95,7 +122,7 @@ pub fn main() anyerror!void {
         item.thread = try std.Thread.spawn(
             .{},
             struct {
-                fn worker(server: *httpserver.Server) !void {
+                fn worker(server: *httpserver.Server(usize)) !void {
                     return server.run(1 * time.ns_per_s);
                 }
             }.worker,
