@@ -25,6 +25,13 @@ const TestHarness = struct {
     server: httpserver.Server(*Self),
     thread: std.Thread,
 
+    pub fn format(self: *const Self, comptime fmt_string: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = self;
+        _ = fmt_string;
+        _ = options;
+        try writer.writeAll("0");
+    }
+
     fn create(allocator: mem.Allocator, comptime handler: httpserver.RequestHandler(*Self)) !*TestHarness {
         const socket = blk: {
             const sockfd = try os.socket(os.AF.INET6, os.SOCK.STREAM, 0);
@@ -55,7 +62,7 @@ const TestHarness = struct {
         };
         try res.server.init(
             allocator,
-            .{ .id = 0 },
+            .{},
             &res.running,
             socket,
             res,
@@ -110,9 +117,9 @@ test "GET 200 OK" {
         var th = try TestHarness.create(
             testing.allocator,
             struct {
-                fn handle(per_request_allocator: mem.Allocator, ctx: *TestHarness, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.Response {
-                    _ = per_request_allocator;
+                fn handle(ctx: *TestHarness, per_request_allocator: mem.Allocator, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.Response {
                     _ = ctx;
+                    _ = per_request_allocator;
                     _ = peer;
                     _ = req;
 
@@ -156,9 +163,9 @@ test "POST 200 OK" {
     var th = try TestHarness.create(
         testing.allocator,
         struct {
-            fn handle(per_request_allocator: mem.Allocator, ctx: *TestHarness, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.Response {
-                _ = per_request_allocator;
+            fn handle(ctx: *TestHarness, per_request_allocator: mem.Allocator, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.Response {
                 _ = ctx;
+                _ = per_request_allocator;
                 _ = peer;
                 _ = req;
 
@@ -199,9 +206,9 @@ test "GET files" {
     var th = try TestHarness.create(
         testing.allocator,
         struct {
-            fn handle(per_request_allocator: mem.Allocator, ctx: *TestHarness, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.Response {
-                _ = per_request_allocator;
+            fn handle(ctx: *TestHarness, per_request_allocator: mem.Allocator, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.Response {
                 _ = ctx;
+                _ = per_request_allocator;
                 _ = peer;
                 _ = req;
 
