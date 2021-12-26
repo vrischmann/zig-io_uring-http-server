@@ -102,8 +102,8 @@ pub fn main() anyerror!void {
     for (servers) |*item, i| {
         try item.server.init(
             allocator,
-            i,
             .{
+                .id = i,
                 .max_ring_entries = max_ring_entries,
                 .max_buffer_size = max_buffer_size,
                 .max_connections = max_connections,
