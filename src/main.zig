@@ -55,36 +55,51 @@ fn addSignalHandlers() void {
     }
 }
 
-fn handleRequest(per_request_allocator: mem.Allocator, ctx: usize, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.Response {
-    _ = per_request_allocator;
+const ServerContext = struct {
+    const Self = @This();
 
-    logger.debug("ctx#{d:<4} IN HANDLER addr={s} method: {s}, path: {s}, minor version: {d}, body: \"{s}\"", .{
-        ctx,
-        peer.addr,
-        req.method.toString(),
-        req.path,
-        req.minor_version,
-        req.body,
-    });
+    id: usize,
+    server: httpserver.Server(*Self),
+    thread: std.Thread,
 
-    if (mem.startsWith(u8, req.path, "/static")) {
-        return httpserver.Response{
-            .send_file = .{
-                .status_code = .ok,
-                .headers = &[_]httpserver.Header{},
-                .path = req.path[1..],
-            },
-        };
-    } else {
-        return httpserver.Response{
-            .response = .{
-                .status_code = .ok,
-                .headers = &[_]httpserver.Header{},
-                .data = "Hello, World in handler!",
-            },
-        };
+    pub fn format(self: *const Self, comptime fmt_string: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = options;
+
+        if (comptime !mem.eql(u8, "s", fmt_string)) @compileError("format string must be s");
+        try writer.print("{d}", .{self.id});
     }
-}
+
+    fn handleRequest(self: *Self, per_request_allocator: mem.Allocator, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.Response {
+        _ = per_request_allocator;
+
+        logger.debug("ctx#{d:<4} IN HANDLER addr={s} method: {s}, path: {s}, minor version: {d}, body: \"{s}\"", .{
+            self.id,
+            peer.addr,
+            req.method.toString(),
+            req.path,
+            req.minor_version,
+            req.body,
+        });
+
+        if (mem.startsWith(u8, req.path, "/static")) {
+            return httpserver.Response{
+                .send_file = .{
+                    .status_code = .ok,
+                    .headers = &[_]httpserver.Header{},
+                    .path = req.path[1..],
+                },
+            };
+        } else {
+            return httpserver.Response{
+                .response = .{
+                    .status_code = .ok,
+                    .headers = &[_]httpserver.Header{},
+                    .data = "Hello, World in handler!",
+                },
+            };
+        }
+    }
+};
 
 pub fn main() anyerror!void {
     var gpa = heap.GeneralPurposeAllocator(.{}){};
@@ -124,25 +139,20 @@ pub fn main() anyerror!void {
 
     // Create the servers
 
-    const ServerWithThread = struct {
-        server: httpserver.Server(usize),
-        thread: std.Thread,
-    };
-
-    var servers = try allocator.alloc(ServerWithThread, max_server_threads);
+    var servers = try allocator.alloc(ServerContext, max_server_threads);
     for (servers) |*item, i| {
+        item.id = i;
         try item.server.init(
             allocator,
             .{
-                .id = i,
                 .max_ring_entries = max_ring_entries,
                 .max_buffer_size = max_buffer_size,
                 .max_connections = max_connections,
             },
             &global_running,
             server_fd,
-            i,
-            handleRequest,
+            item,
+            ServerContext.handleRequest,
         );
     }
     defer {
@@ -154,7 +164,7 @@ pub fn main() anyerror!void {
         item.thread = try std.Thread.spawn(
             .{},
             struct {
-                fn worker(server: *httpserver.Server(usize)) !void {
+                fn worker(server: *httpserver.Server(*ServerContext)) !void {
                     return server.run(1 * time.ns_per_s);
                 }
             }.worker,
