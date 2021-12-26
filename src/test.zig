@@ -103,7 +103,8 @@ test "GET 200 OK" {
         var th = try TestHarness.create(
             testing.allocator,
             struct {
-                fn handle(ctx: *TestHarness, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.HandlerAction {
+                fn handle(per_request_allocator: mem.Allocator, ctx: *TestHarness, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.Response {
+                    _ = per_request_allocator;
                     _ = ctx;
                     _ = peer;
                     _ = req;
@@ -116,10 +117,11 @@ test "GET 200 OK" {
                     try testing.expect(req.headers.get("Content-Type") == null);
                     try testing.expect(req.body == null);
 
-                    return httpserver.HandlerAction{
-                        .respond = .{
+                    return httpserver.Response{
+                        .response = .{
                             .status_code = .ok,
-                            .data = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!",
+                            .headers = &[_]httpserver.Header{},
+                            .data = "Hello, World!",
                         },
                     };
                 }
@@ -147,7 +149,8 @@ test "POST 200 OK" {
     var th = try TestHarness.create(
         testing.allocator,
         struct {
-            fn handle(ctx: *TestHarness, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.HandlerAction {
+            fn handle(per_request_allocator: mem.Allocator, ctx: *TestHarness, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.Response {
+                _ = per_request_allocator;
                 _ = ctx;
                 _ = peer;
                 _ = req;
@@ -160,10 +163,11 @@ test "POST 200 OK" {
                 try testing.expectEqual(body.len, try fmt.parseInt(usize, req.headers.get("Content-Length").?.value, 10));
                 try testing.expectEqualStrings(body, req.body.?);
 
-                return httpserver.HandlerAction{
-                    .respond = .{
+                return httpserver.Response{
+                    .response = .{
                         .status_code = .ok,
-                        .data = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!",
+                        .headers = &[_]httpserver.Header{},
+                        .data = "Hello, World!",
                     },
                 };
             }
@@ -188,7 +192,8 @@ test "GET files" {
     var th = try TestHarness.create(
         testing.allocator,
         struct {
-            fn handle(ctx: *TestHarness, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.HandlerAction {
+            fn handle(per_request_allocator: mem.Allocator, ctx: *TestHarness, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.Response {
+                _ = per_request_allocator;
                 _ = ctx;
                 _ = peer;
                 _ = req;
@@ -202,9 +207,10 @@ test "GET files" {
 
                 const path = req.path[1..];
 
-                return httpserver.HandlerAction{
+                return httpserver.Response{
                     .send_file = .{
                         .status_code = .ok,
+                        .headers = &[_]httpserver.Header{},
                         .path = path,
                     },
                 };
@@ -219,7 +225,7 @@ test "GET files" {
         exp_response_code: usize,
     }{
         .{ .path = "/static/foobar.txt", .exp_data = "foobar content\n", .exp_response_code = 200 },
-        .{ .path = "/static/notfound.txt", .exp_data = "", .exp_response_code = 404 },
+        .{ .path = "/static/notfound.txt", .exp_data = "Not Found", .exp_response_code = 404 },
     };
 
     inline for (test_cases) |tc| {

@@ -91,24 +91,35 @@ pub fn main() anyerror!void {
             server_fd,
             i,
             struct {
-                fn handle(ctx: usize, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.HandlerAction {
-                    _ = ctx;
+                fn handle(per_request_allocator: mem.Allocator, ctx: usize, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.Response {
+                    _ = per_request_allocator;
 
                     logger.debug("ctx#{d:<4} IN HANDLER addr={s} method: {s}, path: {s}, minor version: {d}, body: \"{s}\"", .{
                         ctx,
                         peer.addr,
-                        req.method,
+                        req.method.toString(),
                         req.path,
                         req.minor_version,
                         req.body,
                     });
 
-                    return httpserver.HandlerAction{
-                        .respond = .{
-                            .status_code = .ok,
-                            .data = "HTTP/1.1 200 OK\r\nContent-Length: 24\r\n\r\nHello, World in handler!",
-                        },
-                    };
+                    if (mem.startsWith(u8, req.path, "/static")) {
+                        return httpserver.Response{
+                            .send_file = .{
+                                .status_code = .ok,
+                                .headers = &[_]httpserver.Header{},
+                                .path = req.path[1..],
+                            },
+                        };
+                    } else {
+                        return httpserver.Response{
+                            .response = .{
+                                .status_code = .ok,
+                                .headers = &[_]httpserver.Header{},
+                                .data = "Hello, World in handler!",
+                            },
+                        };
+                    }
                 }
             }.handle,
         );

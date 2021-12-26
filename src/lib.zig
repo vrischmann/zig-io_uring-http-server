@@ -281,21 +281,13 @@ fn parseRequest(previous_buffer_len: usize, buffer: []const u8) !?ParseRequestRe
     };
 }
 
+/// Contains peer information for a request.
 pub const Peer = struct {
     addr: net.Address,
 };
 
-pub const HandlerAction = union(enum) {
-    respond: struct {
-        status_code: StatusCode,
-        data: []const u8,
-    },
-    send_file: struct {
-        status_code: StatusCode,
-        path: []const u8,
-    },
-};
-
+/// Contains request data.
+/// This is what the handler will receive.
 pub const Request = struct {
     method: Method,
     path: []const u8,
@@ -314,8 +306,24 @@ pub const Request = struct {
     }
 };
 
+/// The response returned by the handler.
+pub const Response = union(enum) {
+    /// The response is a simple buffer.
+    response: struct {
+        status_code: StatusCode,
+        headers: []Header,
+        data: []const u8,
+    },
+    /// The response is a static file that will be read from the filesystem.
+    send_file: struct {
+        status_code: StatusCode,
+        headers: []Header,
+        path: []const u8,
+    },
+};
+
 pub fn RequestHandler(comptime Context: type) type {
-    return fn (Context, Peer, Request) anyerror!HandlerAction;
+    return fn (mem.Allocator, Context, Peer, Request) anyerror!Response;
 }
 
 /// The HTTP server.
@@ -482,23 +490,21 @@ const ClientState = struct {
         body: ?[]const u8 = null,
     };
 
+    /// Holds state used to send a response to the client.
     const ResponseState = struct {
+        /// keeps track of the number of bytes that we written on the socket
         written: usize = 0,
 
+        /// status code and header are overwritable in the handler
         status_code: StatusCode = .ok,
+        headers: []Header = &[_]Header{},
 
+        /// state used when we need to send a static file from the filesystem.
         file: struct {
             path: [:0]u8 = undefined,
             fd: os.fd_t = -1,
             statx_buf: os.linux.Statx = undefined,
         } = .{},
-
-        pub fn reset(self: *ResponseState) void {
-            const headers = self.headers;
-            self.* = .{
-                .headers = headers,
-            };
-        }
     };
 
     gpa: mem.Allocator,
@@ -543,18 +549,33 @@ const ClientState = struct {
         self.buffer.deinit();
     }
 
-    pub fn setBuffer(self: *ClientState, data: []const u8) void {
-        self.buffer.expandToCapacity();
-        self.buffer.items = self.buffer.items[0..data.len];
-
-        mem.copy(u8, self.buffer.items, data);
-    }
-
     fn refreshBody(self: *ClientState) void {
         const consumed = self.request_state.parse_result.consumed;
         if (consumed > 0) {
             self.request_state.body = self.buffer.items[consumed..];
         }
+    }
+
+    pub fn reset(self: *ClientState) void {
+        self.request_state = .{};
+        self.response_state = .{};
+        self.buffer.clearRetainingCapacity();
+    }
+
+    fn writeResponsePreambule(self: *ClientState, content_length: ?usize) !void {
+        var writer = self.buffer.writer();
+
+        try writer.print("HTTP/1.1 {d} {s}\n", .{
+            @enumToInt(self.response_state.status_code),
+            self.response_state.status_code.toString(),
+        });
+        for (self.response_state.headers) |header| {
+            try writer.print("{s}: {s}\n", .{ header.name, header.value });
+        }
+        if (content_length) |n| {
+            try writer.print("Content-Length: {d}\n", .{n});
+        }
+        try writer.print("\n", .{});
     }
 };
 
@@ -1165,9 +1186,7 @@ pub fn Server(comptime Context: type) type {
             client.response_state.file.fd = -1;
 
             // Reset the client state
-            client.request_state = .{};
-            client.response_state = .{};
-            client.buffer.clearRetainingCapacity();
+            client.reset();
 
             _ = try self.submitRead(client, client.fd, 0, onReadRequest);
         }
@@ -1224,23 +1243,13 @@ pub fn Server(comptime Context: type) type {
                 fmt.fmtIntSizeBin(client.response_state.file.statx_buf.size),
             });
 
-            // Prepare the preambule + headers
-
+            // Prepare the preambule + headers.
+            // This will be written to the socket on the next write operation following
+            // the first read operation for this file.
             client.response_state.status_code = .ok;
+            try client.writeResponsePreambule(client.response_state.file.statx_buf.size);
 
-            var w = client.buffer.writer();
-
-            try w.print("HTTP/1.1 {d} {s}\n", .{
-                @enumToInt(client.response_state.status_code),
-                @tagName(client.response_state.status_code),
-            });
-            try w.print("Content-Length: {d}\n", .{
-                client.response_state.file.statx_buf.size,
-            });
-            try w.print("\n", .{});
-
-            //
-
+            // Now read the response file
             if (client.registered_fd) |registered_fd| {
                 var sqe = try self.submitRead(client, registered_fd, 0, onReadResponseFile);
                 sqe.flags |= os.linux.IOSQE_FIXED_FILE;
@@ -1347,21 +1356,44 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn callHandler(self: *Self, client: *ClientState) !void {
+            // Create a request for the handler.
+            // This doesn't own any data and it only lives for the duration of this function call.
             const req = try Request.create(
                 client.request_state.parse_result.raw_request,
                 client.request_state.body,
             );
 
-            const action = try self.handler(self.user_context, client.peer, req);
+            // Call the user provided handler to get a response.
+            const response = try self.handler(
+                client.gpa,
+                self.user_context,
+                client.peer,
+                req,
+            );
+            // TODO(vincent): cleanup in case of errors ?
+            // errdefer client.reset();
 
-            switch (action) {
-                .respond => |res| {
-                    client.setBuffer(res.data);
+            // At this point the request data is no longer needed so we can clear the buffer.
+            client.buffer.clearRetainingCapacity();
+
+            // Process the response:
+            // * `response` contains a simple buffer that we can write to the socket straight away.
+            // * `send_file` contains a file path that we need to open and statx before we can read/write it to the socket.
+
+            switch (response) {
+                .response => |res| {
+                    client.response_state.status_code = res.status_code;
+                    client.response_state.headers = res.headers;
+
+                    try client.writeResponsePreambule(res.data.len);
+                    try client.buffer.appendSlice(res.data);
+
                     _ = try self.submitWrite(client, client.fd, 0, onWriteResponseBuffer);
                 },
                 .send_file => |res| {
+                    client.response_state.status_code = res.status_code;
+                    client.response_state.headers = res.headers;
                     client.response_state.file.path = try client.temp_buffer_fba.allocator().dupeZ(u8, res.path);
-                    client.buffer.clearRetainingCapacity();
 
                     var sqe = try self.submitOpenFile(
                         client,
@@ -1390,9 +1422,11 @@ pub fn Server(comptime Context: type) type {
                 client.peer.addr,
             });
 
-            const static_response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+            const static_response = "Not Found";
 
-            client.setBuffer(static_response);
+            client.response_state.status_code = .not_found;
+            try client.writeResponsePreambule(static_response.len);
+            try client.buffer.appendSlice(static_response);
 
             _ = try self.submitWrite(client, client.fd, 0, onWriteResponseBuffer);
         }
