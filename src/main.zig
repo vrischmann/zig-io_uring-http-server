@@ -15,9 +15,8 @@ const IO_Uring = std.os.linux.IO_Uring;
 const io_uring_cqe = std.os.linux.io_uring_cqe;
 const io_uring_sqe = std.os.linux.io_uring_sqe;
 
+const argsParser = @import("args");
 const httpserver = @import("httpserver");
-
-const max_serve_threads = 1;
 
 const logger = std.log.scoped(.main);
 
@@ -63,17 +62,28 @@ pub fn main() anyerror!void {
     };
     var allocator = gpa.allocator();
 
+    //
+
+    const options = try argsParser.parseForCurrentProcess(struct {
+        @"listen-port": u16 = 3405,
+
+        @"max-server-threads": usize = 1,
+    }, allocator, .print);
+    defer options.deinit();
+
+    const max_server_threads = options.options.@"max-server-threads";
+    const listen_port = options.options.@"listen-port";
+
     // NOTE(vincent): for debugging
     // var logging_allocator = heap.loggingAllocator(gpa.allocator());
     // var allocator = logging_allocator.allocator();
 
-    //
     addSignalHandlers();
 
     // Create the server socket
-    const server_fd = try httpserver.createSocket(3405);
+    const server_fd = try httpserver.createSocket(listen_port);
 
-    logger.info("listening on :3405\n", .{});
+    logger.info("listening on :{d}\n", .{listen_port});
 
     // Create the servers
 
@@ -82,7 +92,7 @@ pub fn main() anyerror!void {
         thread: std.Thread,
     };
 
-    var servers = try allocator.alloc(ServerWithThread, max_serve_threads);
+    var servers = try allocator.alloc(ServerWithThread, max_server_threads);
     for (servers) |*item, i| {
         try item.server.init(
             allocator,
