@@ -53,7 +53,15 @@ const TestHarness = struct {
             .server = undefined,
             .thread = undefined,
         };
-        try res.server.init(allocator, 0, &res.running, socket, res, handler);
+        try res.server.init(
+            allocator,
+            0,
+            .{},
+            &res.running,
+            socket,
+            res,
+            handler,
+        );
 
         // Start thread
 

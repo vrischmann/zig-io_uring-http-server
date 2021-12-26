@@ -19,10 +19,6 @@ const io_uring_sqe = std.os.linux.io_uring_sqe;
 pub const createSocket = @import("io.zig").createSocket;
 const RegisteredFileDescriptors = @import("io.zig").RegisteredFileDescriptors;
 
-const max_ring_entries = 512;
-const max_buffer_size = 4096;
-const max_connections = 128;
-
 const logger = std.log.scoped(.main);
 
 /// HTTP types and stuff
@@ -413,18 +409,20 @@ fn CallbackPool(comptime Context: type) type {
         const CallbackType = Callback(Context);
 
         allocator: mem.Allocator,
+        nb: usize,
         free_list: ?*CallbackType,
 
-        pub fn init(allocator: mem.Allocator) !Self {
+        pub fn init(allocator: mem.Allocator, nb: usize) !Self {
             var res = Self{
                 .allocator = allocator,
+                .nb = nb,
                 .free_list = null,
             };
 
             // Preallocate as many callbacks as ring entries.
 
             var i: usize = 0;
-            while (i < max_ring_entries) : (i += 1) {
+            while (i < nb) : (i += 1) {
                 const callback = try allocator.create(CallbackType);
                 callback.* = .{
                     .debug_msg = "",
@@ -439,7 +437,7 @@ fn CallbackPool(comptime Context: type) type {
 
         pub fn deinit(self: *Self) void {
             // All callbacks must be put back in the pool before deinit is called
-            assert(self.count() == max_ring_entries);
+            assert(self.count() == self.nb);
 
             var ret = self.free_list;
             while (ret) |item| {
@@ -531,7 +529,7 @@ const ClientState = struct {
     // non-null if the client was able to acquire a registered file descriptor.
     registered_fd: ?i32 = null,
 
-    pub fn init(self: *ClientState, allocator: mem.Allocator, peer_addr: net.Address, client_fd: os.socket_t) !void {
+    pub fn init(self: *ClientState, allocator: mem.Allocator, peer_addr: net.Address, client_fd: os.socket_t, max_buffer_size: usize) !void {
         self.* = .{
             .gpa = allocator,
             .peer = .{
@@ -579,6 +577,12 @@ const ClientState = struct {
     }
 };
 
+pub const ServerOptions = struct {
+    max_ring_entries: u13 = 512,
+    max_buffer_size: usize = 4096,
+    max_connections: usize = 128,
+};
+
 pub fn Server(comptime Context: type) type {
     return struct {
         const Self = @This();
@@ -595,6 +599,9 @@ pub fn Server(comptime Context: type) type {
 
         /// this server's ID. Used only for logging.
         id: ID,
+
+        /// options controlling the behaviour of the server.
+        options: ServerOptions,
 
         /// indicates if the server should continue running.
         /// This is _not_ owned by the server but by the caller.
@@ -638,7 +645,7 @@ pub fn Server(comptime Context: type) type {
         },
 
         /// CQEs storage
-        cqes: [max_ring_entries]io_uring_cqe = undefined,
+        cqes: []io_uring_cqe = undefined,
 
         /// List of client states.
         /// A new state is created for each socket accepted and destroyed when the socket is closed for any reason.
@@ -666,27 +673,31 @@ pub fn Server(comptime Context: type) type {
             allocator: mem.Allocator,
             /// used for logging only.
             id: ID,
-            // owned by the caller and indicates if the server should shutdown properly.
+            /// controls the behaviour of the server (max number of connections, max buffer size, etc).
+            options: ServerOptions,
+            /// owned by the caller and indicates if the server should shutdown properly.
             running: *Atomic(bool),
-            // must be a socket properly initialized with listen(2) and bind(2) which will be used for accept(2) operations.
+            /// must be a socket properly initialized with listen(2) and bind(2) which will be used for accept(2) operations.
             server_fd: os.socket_t,
-            // user provided context that will be passed to the request handlers.
+            /// user provided context that will be passed to the request handlers.
             user_context: Context,
-            // user provied request handler.
+            /// user provied request handler.
             comptime handler: RequestHandler(Context),
         ) !void {
             // TODO(vincent): probe for available features for io_uring ?
 
             self.* = .{
                 .root_allocator = allocator,
-                .ring = try std.os.linux.IO_Uring.init(max_ring_entries, 0),
+                .ring = try std.os.linux.IO_Uring.init(options.max_ring_entries, 0),
                 .id = id,
+                .options = options,
                 .running = running,
                 .listener = .{
                     .server_fd = server_fd,
                 },
-                .clients = try std.ArrayList(*ClientState).initCapacity(allocator, max_connections),
-                .callbacks = try CallbackPoolType.init(allocator),
+                .cqes = try allocator.alloc(io_uring_cqe, options.max_ring_entries),
+                .callbacks = try CallbackPoolType.init(allocator, options.max_ring_entries),
+                .clients = try std.ArrayList(*ClientState).initCapacity(allocator, options.max_connections),
                 .registered_fds = .{},
                 .user_context = user_context,
                 .handler = handler,
@@ -700,7 +711,9 @@ pub fn Server(comptime Context: type) type {
                 self.root_allocator.destroy(client);
             }
             self.clients.deinit();
+
             self.callbacks.deinit();
+            self.root_allocator.free(self.cqes);
             self.ring.deinit();
         }
 
@@ -748,7 +761,7 @@ pub fn Server(comptime Context: type) type {
                 // we must stop: stop accepting connections.
                 return;
             }
-            if (self.listener.accept_waiting or self.clients.items.len >= max_connections) {
+            if (self.listener.accept_waiting or self.clients.items.len >= self.options.max_connections) {
                 return;
             }
 
@@ -811,7 +824,7 @@ pub fn Server(comptime Context: type) type {
         /// Returnsd the number of events processed.
         fn processCompletions(self: *Self, nr: usize) !usize {
             // TODO(vincent): how should we handle EAGAIN and EINTR ? right now they will shutdown the server.
-            const cqe_count = try self.ring.copy_cqes(&self.cqes, @intCast(u32, nr));
+            const cqe_count = try self.ring.copy_cqes(self.cqes, @intCast(u32, nr));
 
             for (self.cqes[0..cqe_count]) |cqe| {
                 debug.assert(cqe.user_data != 0);
@@ -959,7 +972,12 @@ pub fn Server(comptime Context: type) type {
             var client = try self.root_allocator.create(ClientState);
             errdefer self.root_allocator.destroy(client);
 
-            try client.init(self.root_allocator, self.listener.peer_addr, client_fd);
+            try client.init(
+                self.root_allocator,
+                self.listener.peer_addr,
+                client_fd,
+                self.options.max_buffer_size,
+            );
             errdefer client.deinit();
 
             try self.clients.append(client);

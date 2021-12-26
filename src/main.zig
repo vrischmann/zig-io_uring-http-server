@@ -68,11 +68,17 @@ pub fn main() anyerror!void {
         @"listen-port": u16 = 3405,
 
         @"max-server-threads": usize = 1,
+        @"max-ring-entries": u13 = 512,
+        @"max-buffer-size": usize = 4096,
+        @"max-connections": usize = 128,
     }, allocator, .print);
     defer options.deinit();
 
-    const max_server_threads = options.options.@"max-server-threads";
     const listen_port = options.options.@"listen-port";
+    const max_server_threads = options.options.@"max-server-threads";
+    const max_ring_entries = options.options.@"max-ring-entries";
+    const max_buffer_size = options.options.@"max-buffer-size";
+    const max_connections = options.options.@"max-connections";
 
     // NOTE(vincent): for debugging
     // var logging_allocator = heap.loggingAllocator(gpa.allocator());
@@ -97,6 +103,11 @@ pub fn main() anyerror!void {
         try item.server.init(
             allocator,
             i,
+            .{
+                .max_ring_entries = max_ring_entries,
+                .max_buffer_size = max_buffer_size,
+                .max_connections = max_connections,
+            },
             &global_running,
             server_fd,
             i,
