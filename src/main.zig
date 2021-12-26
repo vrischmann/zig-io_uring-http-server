@@ -135,7 +135,13 @@ pub fn main() anyerror!void {
     // Create the server socket
     const server_fd = try httpserver.createSocket(listen_port);
 
-    logger.info("listening on :{d}\n", .{listen_port});
+    logger.info("listening on :{d}", .{listen_port});
+    logger.info("max server threads: {d}, max ring entries: {d}, max buffer size: {d}, max connections: {d}", .{
+        max_server_threads,
+        max_ring_entries,
+        max_buffer_size,
+        max_connections,
+    });
 
     // Create the servers
 
