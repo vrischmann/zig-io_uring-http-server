@@ -322,20 +322,6 @@ pub fn RequestHandler(comptime Context: type) type {
     return fn (Context, mem.Allocator, Peer, Request) anyerror!Response;
 }
 
-/// The HTTP server.
-///
-/// This struct does nothing by itself, the caller must drive it to achieve anything.
-/// After initialization the caller must, in a loop:
-/// * call maybeAccept
-/// * call submit
-/// * call processCompletions
-///
-/// Then the server will accept connections and process requests.
-///
-/// NOTE: this is _not_ thread safe ! You must create on Server object per thread.
-
-//
-
 /// Callback encapsulates a context and a function pointer that will be called when
 /// the server loop will process the CQEs.
 /// Pointers to this structure is what get passed as user data in a SQE and what we later get back in a CQE.
@@ -583,6 +569,17 @@ pub const ServerOptions = struct {
     max_connections: usize = 128,
 };
 
+/// The HTTP server.
+///
+/// This struct does nothing by itself, the caller must drive it to achieve anything.
+/// After initialization the caller must, in a loop:
+/// * call maybeAccept
+/// * call submit
+/// * call processCompletions
+///
+/// Then the server will accept connections and process requests.
+///
+/// NOTE: this is _not_ thread safe ! You must create on Server object per thread.
 pub fn Server(comptime Context: type) type {
     return struct {
         const Self = @This();
