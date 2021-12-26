@@ -55,8 +55,7 @@ const TestHarness = struct {
         };
         try res.server.init(
             allocator,
-            0,
-            .{},
+            .{ .id = 0 },
             &res.running,
             socket,
             res,
