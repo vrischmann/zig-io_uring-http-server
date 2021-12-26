@@ -55,6 +55,37 @@ fn addSignalHandlers() void {
     }
 }
 
+fn handleRequest(per_request_allocator: mem.Allocator, ctx: usize, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.Response {
+    _ = per_request_allocator;
+
+    logger.debug("ctx#{d:<4} IN HANDLER addr={s} method: {s}, path: {s}, minor version: {d}, body: \"{s}\"", .{
+        ctx,
+        peer.addr,
+        req.method.toString(),
+        req.path,
+        req.minor_version,
+        req.body,
+    });
+
+    if (mem.startsWith(u8, req.path, "/static")) {
+        return httpserver.Response{
+            .send_file = .{
+                .status_code = .ok,
+                .headers = &[_]httpserver.Header{},
+                .path = req.path[1..],
+            },
+        };
+    } else {
+        return httpserver.Response{
+            .response = .{
+                .status_code = .ok,
+                .headers = &[_]httpserver.Header{},
+                .data = "Hello, World in handler!",
+            },
+        };
+    }
+}
+
 pub fn main() anyerror!void {
     var gpa = heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit()) {
@@ -111,38 +142,7 @@ pub fn main() anyerror!void {
             &global_running,
             server_fd,
             i,
-            struct {
-                fn handle(per_request_allocator: mem.Allocator, ctx: usize, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.Response {
-                    _ = per_request_allocator;
-
-                    logger.debug("ctx#{d:<4} IN HANDLER addr={s} method: {s}, path: {s}, minor version: {d}, body: \"{s}\"", .{
-                        ctx,
-                        peer.addr,
-                        req.method.toString(),
-                        req.path,
-                        req.minor_version,
-                        req.body,
-                    });
-
-                    if (mem.startsWith(u8, req.path, "/static")) {
-                        return httpserver.Response{
-                            .send_file = .{
-                                .status_code = .ok,
-                                .headers = &[_]httpserver.Header{},
-                                .path = req.path[1..],
-                            },
-                        };
-                    } else {
-                        return httpserver.Response{
-                            .response = .{
-                                .status_code = .ok,
-                                .headers = &[_]httpserver.Header{},
-                                .data = "Hello, World in handler!",
-                            },
-                        };
-                    }
-                }
-            }.handle,
+            handleRequest,
         );
     }
     defer {
