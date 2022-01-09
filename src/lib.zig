@@ -356,7 +356,7 @@ fn Callback(comptime Context: type) type {
         next: ?*Self = null,
 
         pub fn initStandalone(self: *Self, comptime debug_msg: []const u8, cb: StandaloneFn) void {
-            if (build_options.debug_callbacks) {
+            if (build_options.debug_callback_internals) {
                 logger.debug("CALLBACK ======== initializing standalone callback, msg: {s}", .{debug_msg});
             }
 
@@ -371,7 +371,7 @@ fn Callback(comptime Context: type) type {
         }
 
         pub fn initClient(self: *Self, comptime debug_msg: []const u8, client: *ClientState, cb: ClientFn) void {
-            if (build_options.debug_callbacks) {
+            if (build_options.debug_callback_internals) {
                 logger.debug("CALLBACK ======== initializing client (addr={s}) callback, msg: {s}", .{ client.peer.addr, debug_msg });
             }
 
@@ -458,7 +458,7 @@ fn CallbackPool(comptime Context: type) type {
 
         /// Reset the callback and puts it back into the pool.
         pub fn put(self: *Self, callback: *CallbackType) void {
-            if (build_options.debug_callbacks) {
+            if (build_options.debug_callback_internals) {
                 logger.debug("CALLBACK ======== putting callback to pool, msg: {s}", .{callback.debug_msg});
             }
 
