@@ -427,7 +427,17 @@ fn CallbackPool(comptime Context: type) type {
             switch (TypeInfo) {
                 .Fn => |func| switch (func.args.len) {
                     3 => {
-                        assert(func.args[2].arg_type.? == io_uring_cqe);
+                        comptime {
+                            if (func.args[0].arg_type.? != Context) {
+                                @compileError("invalid 1st arg in callback function " ++ @typeName(Type));
+                            }
+                            if (func.args[1].arg_type.? != *ClientState) {
+                                @compileError("invalid 2nd arg in callback function " ++ @typeName(Type));
+                            }
+                            if (func.args[2].arg_type.? != io_uring_cqe) {
+                                @compileError("invalid 3rd arg in callback function " ++ @typeName(Type));
+                            }
+                        }
 
                         ret.kind = .{
                             .client = .{
@@ -882,7 +892,7 @@ pub fn Server(comptime Context: type) type {
                 });
             }
 
-            var tmp = try self.callbacks.get(onAccept, {});
+            var tmp = try self.callbacks.get(onAccept, .{});
 
             return try self.ring.accept(
                 @ptrToInt(tmp),
