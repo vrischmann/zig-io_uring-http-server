@@ -340,8 +340,6 @@ fn Callback(comptime Context: type) type {
         const ClientFn = fn (Context, *ClientState, io_uring_cqe) anyerror!void;
         const StandaloneFn = fn (Context, io_uring_cqe) anyerror!void;
 
-        debug_msg: []const u8,
-
         kind: union(enum) {
             client: struct {
                 context: *ClientState,
@@ -384,7 +382,6 @@ fn CallbackPool(comptime Context: type) type {
             while (i < nb) : (i += 1) {
                 const callback = try allocator.create(CallbackType);
                 callback.* = .{
-                    .debug_msg = "",
                     .kind = undefined,
                     .next = res.free_list,
                 };
@@ -460,11 +457,6 @@ fn CallbackPool(comptime Context: type) type {
 
         /// Reset the callback and puts it back into the pool.
         pub fn put(self: *Self, callback: *CallbackType) void {
-            if (build_options.debug_callback_internals) {
-                logger.debug("CALLBACK ======== putting callback to pool, msg: {s}", .{callback.debug_msg});
-            }
-
-            callback.debug_msg = "";
             callback.kind = undefined;
             callback.next = self.free_list;
             self.free_list = callback;
