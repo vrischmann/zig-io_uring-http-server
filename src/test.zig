@@ -10,8 +10,9 @@ const time = std.time;
 const Atomic = std.atomic.Atomic;
 const assert = std.debug.assert;
 
+const httpserver = @import("lib.zig");
+
 const curl = @import("curl.zig");
-const httpserver = @import("httpserver");
 
 const port = 34450;
 

@@ -15,8 +15,9 @@ const IO_Uring = std.os.linux.IO_Uring;
 const io_uring_cqe = std.os.linux.io_uring_cqe;
 const io_uring_sqe = std.os.linux.io_uring_sqe;
 
+const httpserver = @import("lib.zig");
+
 const argsParser = @import("args");
-const httpserver = @import("httpserver");
 
 const logger = std.log.scoped(.main);
 

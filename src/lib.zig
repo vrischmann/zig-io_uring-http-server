@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const ascii = std.ascii;
 const debug = std.debug;
 const fmt = std.fmt;
@@ -355,7 +356,9 @@ fn Callback(comptime Context: type) type {
         next: ?*Self = null,
 
         pub fn initStandalone(self: *Self, comptime debug_msg: []const u8, cb: StandaloneFn) void {
-            logger.debug("CALLBACK ======== initializing standalone callback, msg: {s}", .{debug_msg});
+            if (build_options.debug_callbacks) {
+                logger.debug("CALLBACK ======== initializing standalone callback, msg: {s}", .{debug_msg});
+            }
 
             self.* = .{
                 .debug_msg = debug_msg,
@@ -368,7 +371,9 @@ fn Callback(comptime Context: type) type {
         }
 
         pub fn initClient(self: *Self, comptime debug_msg: []const u8, client: *ClientState, cb: ClientFn) void {
-            logger.debug("CALLBACK ======== initializing client (addr={s}) callback, msg: {s}", .{ client.peer.addr, debug_msg });
+            if (build_options.debug_callbacks) {
+                logger.debug("CALLBACK ======== initializing client (addr={s}) callback, msg: {s}", .{ client.peer.addr, debug_msg });
+            }
 
             self.* = .{
                 .debug_msg = debug_msg,
@@ -453,7 +458,9 @@ fn CallbackPool(comptime Context: type) type {
 
         /// Reset the callback and puts it back into the pool.
         pub fn put(self: *Self, callback: *CallbackType) void {
-            logger.debug("CALLBACK ======== putting callback to pool, msg: {s}", .{callback.debug_msg});
+            if (build_options.debug_callbacks) {
+                logger.debug("CALLBACK ======== putting callback to pool, msg: {s}", .{callback.debug_msg});
+            }
 
             callback.debug_msg = "";
             callback.kind = undefined;
