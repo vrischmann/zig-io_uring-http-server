@@ -331,7 +331,6 @@ pub fn RequestHandler(comptime Context: type) type {
 /// * operations associated with a client
 /// * operations not associated with a client
 ///
-/// When a user gets a callback they must call initStandalone or initClient.
 ///
 /// A callback also has a debug message that is known at compile time.
 fn Callback(comptime Context: type) type {
@@ -354,37 +353,6 @@ fn Callback(comptime Context: type) type {
         },
 
         next: ?*Self = null,
-
-        pub fn initStandalone(self: *Self, comptime debug_msg: []const u8, cb: StandaloneFn) void {
-            if (build_options.debug_callback_internals) {
-                logger.debug("CALLBACK ======== initializing standalone callback, msg: {s}", .{debug_msg});
-            }
-
-            self.* = .{
-                .debug_msg = debug_msg,
-                .kind = .{
-                    .standalone = .{
-                        .call = cb,
-                    },
-                },
-            };
-        }
-
-        pub fn initClient(self: *Self, comptime debug_msg: []const u8, client: *ClientState, cb: ClientFn) void {
-            if (build_options.debug_callback_internals) {
-                logger.debug("CALLBACK ======== initializing client (addr={s}) callback, msg: {s}", .{ client.peer.addr, debug_msg });
-            }
-
-            self.* = .{
-                .debug_msg = debug_msg,
-                .kind = .{
-                    .client = .{
-                        .context = client,
-                        .call = cb,
-                    },
-                },
-            };
-        }
     };
 }
 
@@ -449,10 +417,44 @@ fn CallbackPool(comptime Context: type) type {
         }
 
         /// Returns a ready to use callback or an error if none are available.
-        pub fn get(self: *Self) !*CallbackType {
+        pub fn get(self: *Self, comptime f: anytype, args: anytype) !*CallbackType {
             const ret = self.free_list orelse return error.OutOfCallback;
             self.free_list = ret.next;
+
+            // Determine what sort of callback we're getting:
+            // * 3 arguments is fn(Context, *ClientState, io_uring_cqe)
+            // * 2 arguments is fn(Context, io_uring_cqe)
+
+            const Type = @TypeOf(f);
+            const TypeInfo = @typeInfo(Type);
+            switch (TypeInfo) {
+                .Fn => |func| switch (func.args.len) {
+                    3 => {
+                        assert(func.args[2].arg_type.? == io_uring_cqe);
+
+                        ret.kind = .{
+                            .client = .{
+                                .context = args[0],
+                                .call = f,
+                            },
+                        };
+                    },
+                    2 => {
+                        assert(func.args[1].arg_type.? == io_uring_cqe);
+
+                        ret.kind = .{
+                            .standalone = .{
+                                .call = f,
+                            },
+                        };
+                    },
+                    else => @compileError("invalid callback function " ++ @typeName(Type)),
+                },
+                else => @compileError("invalid callback function " ++ @typeName(Type)),
+            }
+
             ret.next = null;
+
             return ret;
         }
 
@@ -888,8 +890,7 @@ pub fn Server(comptime Context: type) type {
                 });
             }
 
-            var tmp = try self.callbacks.get();
-            tmp.initStandalone("submitAccept", onAccept);
+            var tmp = try self.callbacks.get(onAccept, {});
 
             return try self.ring.accept(
                 @ptrToInt(tmp),
@@ -905,8 +906,7 @@ pub fn Server(comptime Context: type) type {
                 logger.debug("ctx#{s:<4} submitting link timeout", .{self.user_context});
             }
 
-            var tmp = try self.callbacks.get();
-            tmp.initStandalone("submitAcceptLinkTimeout", onAcceptLinkTimeout);
+            var tmp = try self.callbacks.get(onAcceptLinkTimeout, .{});
 
             return self.ring.link_timeout(
                 @ptrToInt(tmp),
@@ -915,14 +915,13 @@ pub fn Server(comptime Context: type) type {
             );
         }
 
-        fn submitStandaloneClose(self: *Self, fd: os.fd_t, cb: CallbackType.StandaloneFn) !*io_uring_sqe {
+        fn submitStandaloneClose(self: *Self, fd: os.fd_t, comptime cb: CallbackType.StandaloneFn) !*io_uring_sqe {
             logger.debug("ctx#{s:<4} submitting close of {d}", .{
                 self.user_context,
                 fd,
             });
 
-            var tmp = try self.callbacks.get();
-            tmp.initStandalone("submitStandaloneClose", cb);
+            var tmp = try self.callbacks.get(cb, .{});
 
             return self.ring.close(
                 @ptrToInt(tmp),
@@ -930,15 +929,14 @@ pub fn Server(comptime Context: type) type {
             );
         }
 
-        fn submitClose(self: *Self, client: *ClientState, fd: os.fd_t, cb: CallbackType.ClientFn) !*io_uring_sqe {
+        fn submitClose(self: *Self, client: *ClientState, fd: os.fd_t, comptime cb: CallbackType.ClientFn) !*io_uring_sqe {
             logger.debug("ctx#{s:<4} addr={s} submitting close of {d}", .{
                 self.user_context,
                 client.peer.addr,
                 fd,
             });
 
-            var tmp = try self.callbacks.get();
-            tmp.initClient("submitClose", client, cb);
+            var tmp = try self.callbacks.get(cb, .{client});
 
             return self.ring.close(
                 @ptrToInt(tmp),
@@ -1490,7 +1488,7 @@ pub fn Server(comptime Context: type) type {
             try self.callHandler(client);
         }
 
-        fn submitRead(self: *Self, client: *ClientState, fd: os.socket_t, offset: u64, cb: CallbackType.ClientFn) !*io_uring_sqe {
+        fn submitRead(self: *Self, client: *ClientState, fd: os.socket_t, offset: u64, comptime cb: CallbackType.ClientFn) !*io_uring_sqe {
             logger.debug("ctx#{s:<4} addr={s} submitting read from {d}, offset {d}", .{
                 self.user_context,
                 client.peer.addr,
@@ -1498,8 +1496,7 @@ pub fn Server(comptime Context: type) type {
                 offset,
             });
 
-            var tmp = try self.callbacks.get();
-            tmp.initClient("submitRead", client, cb);
+            var tmp = try self.callbacks.get(cb, .{client});
 
             return self.ring.read(
                 @ptrToInt(tmp),
@@ -1509,7 +1506,7 @@ pub fn Server(comptime Context: type) type {
             );
         }
 
-        fn submitWrite(self: *Self, client: *ClientState, fd: os.fd_t, offset: u64, cb: CallbackType.ClientFn) !*io_uring_sqe {
+        fn submitWrite(self: *Self, client: *ClientState, fd: os.fd_t, offset: u64, comptime cb: CallbackType.ClientFn) !*io_uring_sqe {
             logger.debug("ctx#{s:<4} addr={s} submitting write of {s} to {d}, offset {d}, data=\"{s}\"", .{
                 self.user_context,
                 client.peer.addr,
@@ -1519,8 +1516,7 @@ pub fn Server(comptime Context: type) type {
                 fmt.fmtSliceEscapeLower(client.buffer.items),
             });
 
-            var tmp = try self.callbacks.get();
-            tmp.initClient("submitWrite", client, cb);
+            var tmp = try self.callbacks.get(cb, .{client});
 
             return self.ring.write(
                 @ptrToInt(tmp),
@@ -1530,15 +1526,14 @@ pub fn Server(comptime Context: type) type {
             );
         }
 
-        fn submitOpenFile(self: *Self, client: *ClientState, path: [:0]const u8, flags: u32, mode: os.mode_t, cb: CallbackType.ClientFn) !*io_uring_sqe {
+        fn submitOpenFile(self: *Self, client: *ClientState, path: [:0]const u8, flags: u32, mode: os.mode_t, comptime cb: CallbackType.ClientFn) !*io_uring_sqe {
             logger.debug("ctx#{s:<4} addr={s} submitting open, path=\"{s}\"", .{
                 self.user_context,
                 client.peer.addr,
                 fmt.fmtSliceEscapeLower(path),
             });
 
-            var tmp = try self.callbacks.get();
-            tmp.initClient("submitOpenFile", client, cb);
+            var tmp = try self.callbacks.get(cb, .{client});
 
             return try self.ring.openat(
                 @ptrToInt(tmp),
@@ -1549,15 +1544,14 @@ pub fn Server(comptime Context: type) type {
             );
         }
 
-        fn submitStatxFile(self: *Self, client: *ClientState, path: [:0]const u8, flags: u32, mask: u32, buf: *os.linux.Statx, cb: CallbackType.ClientFn) !*io_uring_sqe {
+        fn submitStatxFile(self: *Self, client: *ClientState, path: [:0]const u8, flags: u32, mask: u32, buf: *os.linux.Statx, comptime cb: CallbackType.ClientFn) !*io_uring_sqe {
             logger.debug("ctx#{s:<4} addr={s} submitting statx, path=\"{s}\"", .{
                 self.user_context,
                 client.peer.addr,
                 fmt.fmtSliceEscapeLower(path),
             });
 
-            var tmp = try self.callbacks.get();
-            tmp.initClient("submitStatxFile", client, cb);
+            var tmp = try self.callbacks.get(cb, .{client});
 
             return self.ring.statx(
                 @ptrToInt(tmp),
