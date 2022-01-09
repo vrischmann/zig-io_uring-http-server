@@ -881,10 +881,12 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn submitAccept(self: *Self) !*io_uring_sqe {
-            logger.debug("ctx#{s:<4} submitting accept on {d}", .{
-                self.user_context,
-                self.listener.server_fd,
-            });
+            if (build_options.debug_accepts) {
+                logger.debug("ctx#{s:<4} submitting accept on {d}", .{
+                    self.user_context,
+                    self.listener.server_fd,
+                });
+            }
 
             var tmp = try self.callbacks.get();
             tmp.initStandalone("submitAccept", onAccept);
@@ -899,7 +901,9 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn submitAcceptLinkTimeout(self: *Self) !*io_uring_sqe {
-            logger.debug("ctx#{s:<4} submitting link timeout", .{self.user_context});
+            if (build_options.debug_accepts) {
+                logger.debug("ctx#{s:<4} submitting link timeout", .{self.user_context});
+            }
 
             var tmp = try self.callbacks.get();
             tmp.initStandalone("submitAcceptLinkTimeout", onAcceptLinkTimeout);
@@ -952,7 +956,9 @@ pub fn Server(comptime Context: type) type {
                     return error.Canceled;
                 },
                 .CANCELED => {
-                    logger.debug("ctx#{s:<4} ON ACCEPT timed out", .{self.user_context});
+                    if (build_options.debug_accepts) {
+                        logger.debug("ctx#{s:<4} ON ACCEPT timed out", .{self.user_context});
+                    }
                     return error.Canceled;
                 },
                 else => |err| {
@@ -984,13 +990,19 @@ pub fn Server(comptime Context: type) type {
         fn onAcceptLinkTimeout(self: *Self, cqe: os.linux.io_uring_cqe) !void {
             switch (cqe.err()) {
                 .CANCELED => {
-                    logger.debug("ctx#{s:<4} ON LINK TIMEOUT operation finished, timeout canceled", .{self.user_context});
+                    if (build_options.debug_accepts) {
+                        logger.debug("ctx#{s:<4} ON LINK TIMEOUT operation finished, timeout canceled", .{self.user_context});
+                    }
                 },
                 .ALREADY => {
-                    logger.debug("ctx#{s:<4} ON LINK TIMEOUT operation already finished before timeout expired", .{self.user_context});
+                    if (build_options.debug_accepts) {
+                        logger.debug("ctx#{s:<4} ON LINK TIMEOUT operation already finished before timeout expired", .{self.user_context});
+                    }
                 },
                 .TIME => {
-                    logger.debug("ctx#{s:<4} ON LINK TIMEOUT timeout finished before accept", .{self.user_context});
+                    if (build_options.debug_accepts) {
+                        logger.debug("ctx#{s:<4} ON LINK TIMEOUT timeout finished before accept", .{self.user_context});
+                    }
                 },
                 else => |err| {
                     logger.err("ctx#{s:<4} ON LINK TIMEOUT unexpected errno={}", .{ self.user_context, err });

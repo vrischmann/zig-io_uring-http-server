@@ -5,6 +5,7 @@ pub fn build(b: *std.build.Builder) void {
     const mode = b.standardReleaseOptions();
 
     const debug_callback_internals = b.option(bool, "debug-callback-internals", "Enable callback debugging") orelse false;
+    const debug_accepts = b.option(bool, "debug-accepts", "Enable debugging for accepts") orelse false;
 
     const picohttp_flags: []const []const u8 = switch (mode) {
         .Debug => &.{},
@@ -24,6 +25,7 @@ pub fn build(b: *std.build.Builder) void {
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "debug_callback_internals", debug_callback_internals);
+    build_options.addOption(bool, "debug_accepts", debug_accepts);
 
     const exe = b.addExecutable("httpserver", "src/main.zig");
     exe.addPackagePath("args", "third_party/zig-args/args.zig");
