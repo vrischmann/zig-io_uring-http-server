@@ -330,9 +330,6 @@ pub fn RequestHandler(comptime Context: type) type {
 /// There are two kinds of callbacks currently:
 /// * operations associated with a client
 /// * operations not associated with a client
-///
-///
-/// A callback also has a debug message that is known at compile time.
 fn Callback(comptime Context: type) type {
     return struct {
         const Self = @This();
