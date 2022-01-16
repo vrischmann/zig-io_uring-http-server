@@ -19,6 +19,7 @@ const io_uring_sqe = std.os.linux.io_uring_sqe;
 
 pub const createSocket = @import("io.zig").createSocket;
 const RegisteredFileDescriptors = @import("io.zig").RegisteredFileDescriptors;
+const Callback = @import("callback.zig").Callback;
 
 const logger = std.log.scoped(.main);
 
@@ -323,154 +324,6 @@ pub fn RequestHandler(comptime Context: type) type {
     return fn (Context, mem.Allocator, Peer, Request) anyerror!Response;
 }
 
-/// Callback encapsulates a context and a function pointer that will be called when
-/// the server loop will process the CQEs.
-/// Pointers to this structure is what get passed as user data in a SQE and what we later get back in a CQE.
-///
-/// There are two kinds of callbacks currently:
-/// * operations associated with a client
-/// * operations not associated with a client
-fn Callback(comptime Context: type) type {
-    return struct {
-        const Self = @This();
-
-        const ClientFn = fn (Context, *ClientState, io_uring_cqe) anyerror!void;
-        const StandaloneFn = fn (Context, io_uring_cqe) anyerror!void;
-
-        kind: union(enum) {
-            client: struct {
-                context: *ClientState,
-                call: ClientFn,
-            },
-            standalone: struct {
-                call: StandaloneFn,
-            },
-        },
-
-        next: ?*Self = null,
-    };
-}
-
-/// CallbackPool is a pool of callback objects that facilitates lifecycle management of a callback.
-/// The implementation is a free list of pre-allocated objects.
-///
-/// For each SQEs a callback must be obtained via get().
-/// When the server loop is processing CQEs it will use the callback and then release it with put().
-fn CallbackPool(comptime Context: type) type {
-    return struct {
-        const Self = @This();
-
-        const CallbackType = Callback(Context);
-
-        allocator: mem.Allocator,
-        nb: usize,
-        free_list: ?*CallbackType,
-
-        pub fn init(allocator: mem.Allocator, nb: usize) !Self {
-            var res = Self{
-                .allocator = allocator,
-                .nb = nb,
-                .free_list = null,
-            };
-
-            // Preallocate as many callbacks as ring entries.
-
-            var i: usize = 0;
-            while (i < nb) : (i += 1) {
-                const callback = try allocator.create(CallbackType);
-                callback.* = .{
-                    .kind = undefined,
-                    .next = res.free_list,
-                };
-                res.free_list = callback;
-            }
-
-            return res;
-        }
-
-        pub fn deinit(self: *Self) void {
-            // All callbacks must be put back in the pool before deinit is called
-            assert(self.count() == self.nb);
-
-            var ret = self.free_list;
-            while (ret) |item| {
-                ret = item.next;
-                self.allocator.destroy(item);
-            }
-        }
-
-        /// Returns the number of callback in the pool.
-        pub fn count(self: *Self) usize {
-            var n: usize = 0;
-            var ret = self.free_list;
-            while (ret) |item| {
-                n += 1;
-                ret = item.next;
-            }
-            return n;
-        }
-
-        /// Returns a ready to use callback or an error if none are available.
-        pub fn get(self: *Self, comptime f: anytype, args: anytype) !*CallbackType {
-            const ret = self.free_list orelse return error.OutOfCallback;
-            self.free_list = ret.next;
-
-            // Determine what sort of callback we're getting:
-            // * 3 arguments is fn(Context, *ClientState, io_uring_cqe)
-            // * 2 arguments is fn(Context, io_uring_cqe)
-
-            const Type = @TypeOf(f);
-            const TypeInfo = @typeInfo(Type);
-            switch (TypeInfo) {
-                .Fn => |func| switch (func.args.len) {
-                    3 => {
-                        comptime {
-                            if (func.args[0].arg_type.? != Context) {
-                                @compileError("invalid 1st arg in callback function " ++ @typeName(Type));
-                            }
-                            if (func.args[1].arg_type.? != *ClientState) {
-                                @compileError("invalid 2nd arg in callback function " ++ @typeName(Type));
-                            }
-                            if (func.args[2].arg_type.? != io_uring_cqe) {
-                                @compileError("invalid 3rd arg in callback function " ++ @typeName(Type));
-                            }
-                        }
-
-                        ret.kind = .{
-                            .client = .{
-                                .context = args[0],
-                                .call = f,
-                            },
-                        };
-                    },
-                    2 => {
-                        assert(func.args[1].arg_type.? == io_uring_cqe);
-
-                        ret.kind = .{
-                            .standalone = .{
-                                .call = f,
-                            },
-                        };
-                    },
-                    else => @compileError("invalid callback function " ++ @typeName(Type)),
-                },
-                else => @compileError("invalid callback function " ++ @typeName(Type)),
-            }
-
-            ret.next = null;
-
-            return ret;
-        }
-
-        /// Reset the callback and puts it back into the pool.
-        pub fn put(self: *Self, callback: *CallbackType) void {
-            callback.kind = undefined;
-            callback.next = self.free_list;
-            self.free_list = callback;
-        }
-    };
-}
-
 const ClientState = struct {
     const RequestState = struct {
         parse_result: ParseRequestResult = .{
@@ -591,8 +444,7 @@ pub const ServerOptions = struct {
 pub fn Server(comptime Context: type) type {
     return struct {
         const Self = @This();
-        const CallbackType = Callback(*Self);
-        const CallbackPoolType = CallbackPool(*Self);
+        const CallbackType = Callback(*Self, *ClientState);
 
         /// allocator used to allocate each client state
         root_allocator: mem.Allocator,
@@ -652,8 +504,8 @@ pub fn Server(comptime Context: type) type {
         clients: std.ArrayList(*ClientState),
 
         /// Free list of callback objects necessary for working with the uring.
-        /// See the documentation of CallbackPool.
-        callbacks: CallbackPoolType,
+        /// See the documentation of Callback.Pool.
+        callbacks: CallbackType.Pool,
 
         /// Set of registered file descriptors for use with the uring.
         ///
@@ -693,12 +545,15 @@ pub fn Server(comptime Context: type) type {
                     .server_fd = server_fd,
                 },
                 .cqes = try allocator.alloc(io_uring_cqe, options.max_ring_entries),
-                .callbacks = try CallbackPoolType.init(allocator, options.max_ring_entries),
                 .clients = try std.ArrayList(*ClientState).initCapacity(allocator, options.max_connections),
+                .callbacks = undefined,
                 .registered_fds = .{},
                 .user_context = user_context,
                 .handler = handler,
             };
+
+            self.callbacks = try CallbackType.Pool.init(allocator, self, options.max_ring_entries);
+
             try self.registered_fds.register(&self.ring);
         }
 
@@ -836,18 +691,9 @@ pub fn Server(comptime Context: type) type {
                 // Note that while the callback function signature can return an error we don't bubble them up
                 // simply because we can't shutdown the server due to a processing error.
 
-                switch (cb.kind) {
-                    .client => |client_cb| {
-                        client_cb.call(self, client_cb.context, cqe) catch |err| {
-                            self.handleClientCallbackError(client_cb.context, err);
-                        };
-                    },
-                    .standalone => |standalone_cb| {
-                        standalone_cb.call(self, cqe) catch |err| {
-                            self.handleStandaloneCallbackError(err);
-                        };
-                    },
-                }
+                cb.call(cb.server, cb.client_context, cqe) catch |err| {
+                    self.handleCallbackError(cb.client_context, err);
+                };
             }
 
             self.pending -= cqe_count;
@@ -855,30 +701,26 @@ pub fn Server(comptime Context: type) type {
             return cqe_count;
         }
 
-        fn handleStandaloneCallbackError(self: *Self, err: anyerror) void {
+        fn handleCallbackError(self: *Self, client_opt: ?*ClientState, err: anyerror) void {
             if (err == error.Canceled) return;
 
-            logger.err("ctx#{s:<4} unexpected error {s}", .{ self.user_context, err });
-        }
+            if (client_opt) |client| {
+                switch (err) {
+                    error.ConnectionResetByPeer => {
+                        logger.info("ctx#{s:<4} client fd={d} disconnected", .{ self.user_context, client.fd });
+                    },
+                    error.UnexpectedEOF => {
+                        logger.debug("ctx#{s:<4} unexpected eof", .{self.user_context});
+                    },
+                    else => {
+                        logger.err("ctx#{s:<4} unexpected error {s}", .{ self.user_context, err });
+                    },
+                }
 
-        fn handleClientCallbackError(self: *Self, client: *ClientState, err: anyerror) void {
-            // This is the only error that doesn't trigger a close of the socket (for now).
-            // Handle it separately to avoid code repetition.
-            if (err == error.Canceled) return;
-
-            switch (err) {
-                error.ConnectionResetByPeer => {
-                    logger.info("ctx#{s:<4} client fd={d} disconnected", .{ self.user_context, client.fd });
-                },
-                error.UnexpectedEOF => {
-                    logger.debug("ctx#{s:<4} unexpected eof", .{self.user_context});
-                },
-                else => {
-                    logger.err("ctx#{s:<4} unexpected error {s}", .{ self.user_context, err });
-                },
+                _ = self.submitClose(client, client.fd, onCloseClient) catch {};
+            } else {
+                logger.err("ctx#{s:<4} unexpected error {s}", .{ self.user_context, err });
             }
-
-            _ = self.submitClose(client, client.fd, onCloseClient) catch {};
         }
 
         fn submitAccept(self: *Self) !*io_uring_sqe {
@@ -914,7 +756,7 @@ pub fn Server(comptime Context: type) type {
             );
         }
 
-        fn submitStandaloneClose(self: *Self, fd: os.fd_t, comptime cb: CallbackType.StandaloneFn) !*io_uring_sqe {
+        fn submitStandaloneClose(self: *Self, fd: os.fd_t, comptime cb: anytype) !*io_uring_sqe {
             logger.debug("ctx#{s:<4} submitting close of {d}", .{
                 self.user_context,
                 fd,
@@ -928,7 +770,7 @@ pub fn Server(comptime Context: type) type {
             );
         }
 
-        fn submitClose(self: *Self, client: *ClientState, fd: os.fd_t, comptime cb: CallbackType.ClientFn) !*io_uring_sqe {
+        fn submitClose(self: *Self, client: *ClientState, fd: os.fd_t, comptime cb: anytype) !*io_uring_sqe {
             logger.debug("ctx#{s:<4} addr={s} submitting close of {d}", .{
                 self.user_context,
                 client.peer.addr,
@@ -1086,7 +928,12 @@ pub fn Server(comptime Context: type) type {
 
                 logger.debug("ctx#{s:<4} addr={s} HTTP request incomplete, submitting read", .{ self.user_context, client.peer.addr });
 
-                _ = try self.submitRead(client, client.fd, 0, onReadRequest);
+                _ = try self.submitRead(
+                    client,
+                    client.fd,
+                    0,
+                    onReadRequest,
+                );
             }
         }
 
@@ -1243,8 +1090,6 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn onStatxResponseFile(self: *Self, client: *ClientState, cqe: io_uring_cqe) !void {
-            _ = self;
-
             switch (cqe.err()) {
                 .SUCCESS => {
                     debug.assert(client.buffer.items.len == 0);
@@ -1487,7 +1332,7 @@ pub fn Server(comptime Context: type) type {
             try self.callHandler(client);
         }
 
-        fn submitRead(self: *Self, client: *ClientState, fd: os.socket_t, offset: u64, comptime cb: CallbackType.ClientFn) !*io_uring_sqe {
+        fn submitRead(self: *Self, client: *ClientState, fd: os.socket_t, offset: u64, comptime cb: anytype) !*io_uring_sqe {
             logger.debug("ctx#{s:<4} addr={s} submitting read from {d}, offset {d}", .{
                 self.user_context,
                 client.peer.addr,
@@ -1505,7 +1350,7 @@ pub fn Server(comptime Context: type) type {
             );
         }
 
-        fn submitWrite(self: *Self, client: *ClientState, fd: os.fd_t, offset: u64, comptime cb: CallbackType.ClientFn) !*io_uring_sqe {
+        fn submitWrite(self: *Self, client: *ClientState, fd: os.fd_t, offset: u64, comptime cb: anytype) !*io_uring_sqe {
             logger.debug("ctx#{s:<4} addr={s} submitting write of {s} to {d}, offset {d}, data=\"{s}\"", .{
                 self.user_context,
                 client.peer.addr,
@@ -1525,7 +1370,7 @@ pub fn Server(comptime Context: type) type {
             );
         }
 
-        fn submitOpenFile(self: *Self, client: *ClientState, path: [:0]const u8, flags: u32, mode: os.mode_t, comptime cb: CallbackType.ClientFn) !*io_uring_sqe {
+        fn submitOpenFile(self: *Self, client: *ClientState, path: [:0]const u8, flags: u32, mode: os.mode_t, comptime cb: anytype) !*io_uring_sqe {
             logger.debug("ctx#{s:<4} addr={s} submitting open, path=\"{s}\"", .{
                 self.user_context,
                 client.peer.addr,
@@ -1543,7 +1388,7 @@ pub fn Server(comptime Context: type) type {
             );
         }
 
-        fn submitStatxFile(self: *Self, client: *ClientState, path: [:0]const u8, flags: u32, mask: u32, buf: *os.linux.Statx, comptime cb: CallbackType.ClientFn) !*io_uring_sqe {
+        fn submitStatxFile(self: *Self, client: *ClientState, path: [:0]const u8, flags: u32, mask: u32, buf: *os.linux.Statx, comptime cb: anytype) !*io_uring_sqe {
             logger.debug("ctx#{s:<4} addr={s} submitting statx, path=\"{s}\"", .{
                 self.user_context,
                 client.peer.addr,
