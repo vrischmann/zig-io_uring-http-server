@@ -619,13 +619,23 @@ pub fn Server(comptime Context: type) type {
 
             // Queue an accept and link it to a timeout.
 
-            var sqe = try self.submitAccept();
+            var sqe = try self.callbacks.accept(
+                onAccept,
+                self.listener.server_fd,
+                &self.listener.peer_addr.any,
+                &self.listener.peer_addr_size,
+                0,
+            );
             sqe.flags |= os.linux.IOSQE_IO_LINK;
 
             self.listener.timeout.tv_sec = 0;
             self.listener.timeout.tv_nsec = timeout;
 
-            _ = try self.submitAcceptLinkTimeout();
+            _ = try self.callbacks.linkTimeout(
+                onAcceptLinkTimeout,
+                &self.listener.timeout,
+                0,
+            );
 
             self.listener.accept_waiting = true;
         }
@@ -691,7 +701,7 @@ pub fn Server(comptime Context: type) type {
                 // Note that while the callback function signature can return an error we don't bubble them up
                 // simply because we can't shutdown the server due to a processing error.
 
-                cb.call(cb.server, cb.client_context, cqe) catch |err| {
+                cb.call(self, cb.client_context, cqe) catch |err| {
                     self.handleCallbackError(cb.client_context, err);
                 };
             }
@@ -717,72 +727,14 @@ pub fn Server(comptime Context: type) type {
                     },
                 }
 
-                _ = self.submitClose(client, client.fd, onCloseClient) catch {};
+                _ = self.callbacks.close(
+                    onCloseClient,
+                    client,
+                    client.fd,
+                ) catch {};
             } else {
                 logger.err("ctx#{s:<4} unexpected error {s}", .{ self.user_context, err });
             }
-        }
-
-        fn submitAccept(self: *Self) !*io_uring_sqe {
-            if (build_options.debug_accepts) {
-                logger.debug("ctx#{s:<4} submitting accept on {d}", .{
-                    self.user_context,
-                    self.listener.server_fd,
-                });
-            }
-
-            var tmp = try self.callbacks.get(onAccept, .{});
-
-            return try self.ring.accept(
-                @ptrToInt(tmp),
-                self.listener.server_fd,
-                &self.listener.peer_addr.any,
-                &self.listener.peer_addr_size,
-                0,
-            );
-        }
-
-        fn submitAcceptLinkTimeout(self: *Self) !*io_uring_sqe {
-            if (build_options.debug_accepts) {
-                logger.debug("ctx#{s:<4} submitting link timeout", .{self.user_context});
-            }
-
-            var tmp = try self.callbacks.get(onAcceptLinkTimeout, .{});
-
-            return self.ring.link_timeout(
-                @ptrToInt(tmp),
-                &self.listener.timeout,
-                0,
-            );
-        }
-
-        fn submitStandaloneClose(self: *Self, fd: os.fd_t, comptime cb: anytype) !*io_uring_sqe {
-            logger.debug("ctx#{s:<4} submitting close of {d}", .{
-                self.user_context,
-                fd,
-            });
-
-            var tmp = try self.callbacks.get(cb, .{});
-
-            return self.ring.close(
-                @ptrToInt(tmp),
-                fd,
-            );
-        }
-
-        fn submitClose(self: *Self, client: *ClientState, fd: os.fd_t, comptime cb: anytype) !*io_uring_sqe {
-            logger.debug("ctx#{s:<4} addr={s} submitting close of {d}", .{
-                self.user_context,
-                client.peer.addr,
-                fd,
-            });
-
-            var tmp = try self.callbacks.get(cb, .{client});
-
-            return self.ring.close(
-                @ptrToInt(tmp),
-                fd,
-            );
         }
 
         fn onAccept(self: *Self, cqe: os.linux.io_uring_cqe) !void {
@@ -823,7 +775,13 @@ pub fn Server(comptime Context: type) type {
 
             try self.clients.append(client);
 
-            _ = try self.submitRead(client, client_fd, 0, onReadRequest);
+            _ = try self.callbacks.read(
+                onReadRequest,
+                client,
+                client_fd,
+                &client.temp_buffer,
+                0,
+            );
         }
 
         fn onAcceptLinkTimeout(self: *Self, cqe: os.linux.io_uring_cqe) !void {
@@ -928,11 +886,12 @@ pub fn Server(comptime Context: type) type {
 
                 logger.debug("ctx#{s:<4} addr={s} HTTP request incomplete, submitting read", .{ self.user_context, client.peer.addr });
 
-                _ = try self.submitRead(
+                _ = try self.callbacks.read(
+                    onReadRequest,
                     client,
                     client.fd,
+                    &client.temp_buffer,
                     0,
-                    onReadRequest,
                 );
             }
         }
@@ -962,7 +921,13 @@ pub fn Server(comptime Context: type) type {
                 // Remove the already written data
                 try client.buffer.replaceRange(0, written, &[0]u8{});
 
-                _ = try self.submitWrite(client, client.fd, 0, onWriteResponseBuffer);
+                _ = try self.callbacks.write(
+                    onWriteResponseBuffer,
+                    client,
+                    client.fd,
+                    client.buffer.items,
+                    0,
+                );
                 return;
             }
 
@@ -975,7 +940,13 @@ pub fn Server(comptime Context: type) type {
             client.request_state = .{};
             client.buffer.clearRetainingCapacity();
 
-            _ = try self.submitRead(client, client.fd, 0, onReadRequest);
+            _ = try self.callbacks.read(
+                onReadRequest,
+                client,
+                client.fd,
+                &client.temp_buffer,
+                0,
+            );
         }
 
         fn onCloseResponseFile(self: *Self, client: *ClientState, cqe: os.linux.io_uring_cqe) !void {
@@ -1025,7 +996,13 @@ pub fn Server(comptime Context: type) type {
                 // Remove the already written data
                 try client.buffer.replaceRange(0, written, &[0]u8{});
 
-                _ = try self.submitWrite(client, client.fd, 0, onWriteResponseFile);
+                _ = try self.callbacks.write(
+                    onWriteResponseFile,
+                    client,
+                    client.fd,
+                    client.buffer.items,
+                    0,
+                );
                 return;
             }
 
@@ -1035,10 +1012,22 @@ pub fn Server(comptime Context: type) type {
                 client.buffer.clearRetainingCapacity();
 
                 if (client.registered_fd) |registered_fd| {
-                    var sqe = try self.submitRead(client, registered_fd, 0, onReadResponseFile);
+                    var sqe = try self.callbacks.read(
+                        onReadResponseFile,
+                        client,
+                        registered_fd,
+                        &client.temp_buffer,
+                        0,
+                    );
                     sqe.flags |= os.linux.IOSQE_FIXED_FILE;
                 } else {
-                    _ = try self.submitRead(client, client.response_state.file.fd, 0, onReadResponseFile);
+                    _ = try self.callbacks.read(
+                        onReadResponseFile,
+                        client,
+                        client.response_state.file.fd,
+                        &client.temp_buffer,
+                        0,
+                    );
                 }
                 return;
             }
@@ -1052,13 +1041,23 @@ pub fn Server(comptime Context: type) type {
 
             releaseRegisteredFileDescriptor(self, client);
             // Close the response file descriptor
-            _ = try self.submitClose(client, client.response_state.file.fd, onCloseResponseFile);
+            _ = try self.callbacks.close(
+                onCloseResponseFile,
+                client,
+                client.response_state.file.fd,
+            );
             client.response_state.file.fd = -1;
 
             // Reset the client state
             client.reset();
 
-            _ = try self.submitRead(client, client.fd, 0, onReadRequest);
+            _ = try self.callbacks.read(
+                onReadRequest,
+                client,
+                client.fd,
+                &client.temp_buffer,
+                0,
+            );
         }
 
         fn onReadResponseFile(self: *Self, client: *ClientState, cqe: io_uring_cqe) !void {
@@ -1086,7 +1085,13 @@ pub fn Server(comptime Context: type) type {
 
             try client.buffer.appendSlice(client.temp_buffer[0..read]);
 
-            _ = try self.submitWrite(client, client.fd, 0, onWriteResponseFile);
+            _ = try self.callbacks.write(
+                onWriteResponseFile,
+                client,
+                client.fd,
+                client.buffer.items,
+                0,
+            );
         }
 
         fn onStatxResponseFile(self: *Self, client: *ClientState, cqe: io_uring_cqe) !void {
@@ -1119,10 +1124,22 @@ pub fn Server(comptime Context: type) type {
 
             // Now read the response file
             if (client.registered_fd) |registered_fd| {
-                var sqe = try self.submitRead(client, registered_fd, 0, onReadResponseFile);
+                var sqe = try self.callbacks.read(
+                    onReadResponseFile,
+                    client,
+                    registered_fd,
+                    &client.temp_buffer,
+                    0,
+                );
                 sqe.flags |= os.linux.IOSQE_FIXED_FILE;
             } else {
-                _ = try self.submitRead(client, client.response_state.file.fd, 0, onReadResponseFile);
+                _ = try self.callbacks.read(
+                    onReadResponseFile,
+                    client,
+                    client.response_state.file.fd,
+                    &client.temp_buffer,
+                    0,
+                );
             }
         }
 
@@ -1168,7 +1185,13 @@ pub fn Server(comptime Context: type) type {
                 });
 
                 // Not enough data, read more.
-                _ = try self.submitRead(client, client.fd, 0, onReadBody);
+                _ = try self.callbacks.read(
+                    onReadBody,
+                    client,
+                    client.fd,
+                    &client.temp_buffer,
+                    0,
+                );
                 return;
             }
 
@@ -1259,29 +1282,37 @@ pub fn Server(comptime Context: type) type {
                     try client.writeResponsePreambule(res.data.len);
                     try client.buffer.appendSlice(res.data);
 
-                    _ = try self.submitWrite(client, client.fd, 0, onWriteResponseBuffer);
+                    _ = try self.callbacks.write(
+                        onWriteResponseBuffer,
+                        client,
+                        client.fd,
+                        client.buffer.items,
+                        0,
+                    );
                 },
                 .send_file => |res| {
                     client.response_state.status_code = res.status_code;
                     client.response_state.headers = res.headers;
                     client.response_state.file.path = try client.temp_buffer_fba.allocator().dupeZ(u8, res.path);
 
-                    var sqe = try self.submitOpenFile(
+                    var sqe = try self.callbacks.openat(
+                        onOpenResponseFile,
                         client,
+                        os.linux.AT.FDCWD,
                         client.response_state.file.path,
                         os.linux.O.RDONLY | os.linux.O.NOFOLLOW,
                         0644,
-                        onOpenResponseFile,
                     );
                     sqe.flags |= os.linux.IOSQE_IO_LINK;
 
-                    _ = try self.submitStatxFile(
+                    _ = try self.callbacks.statx(
+                        onStatxResponseFile,
                         client,
+                        os.linux.AT.FDCWD,
                         client.response_state.file.path,
                         os.linux.AT.SYMLINK_NOFOLLOW,
                         os.linux.STATX_SIZE,
                         &client.response_state.file.statx_buf,
-                        onStatxResponseFile,
                     );
                 },
             }
@@ -1299,7 +1330,13 @@ pub fn Server(comptime Context: type) type {
             try client.writeResponsePreambule(static_response.len);
             try client.buffer.appendSlice(static_response);
 
-            _ = try self.submitWrite(client, client.fd, 0, onWriteResponseBuffer);
+            _ = try self.callbacks.write(
+                onWriteResponseBuffer,
+                client,
+                client.fd,
+                client.buffer.items,
+                0,
+            );
         }
 
         fn processRequest(self: *Self, client: *ClientState) !void {
@@ -1319,7 +1356,13 @@ pub fn Server(comptime Context: type) type {
                         n,
                     });
 
-                    _ = try self.submitRead(client, client.fd, 0, onReadBody);
+                    _ = try self.callbacks.read(
+                        onReadBody,
+                        client,
+                        client.fd,
+                        &client.temp_buffer,
+                        0,
+                    );
                     return;
                 }
 

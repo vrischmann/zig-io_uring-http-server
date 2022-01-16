@@ -1,10 +1,12 @@
 const std = @import("std");
 const fmt = std.fmt;
 const mem = std.mem;
+const os = std.os;
 
 const assert = std.debug.assert;
 
 const io_uring_cqe = std.os.linux.io_uring_cqe;
+const io_uring_sqe = std.os.linux.io_uring_sqe;
 
 /// Callback encapsulates a context and a function pointer that will be called when
 /// the server loop will process the CQEs.
@@ -17,9 +19,8 @@ pub fn Callback(comptime ServerType: type, comptime ClientContext: type) type {
     return struct {
         const Self = @This();
 
-        server: ServerType,
         client_context: ?ClientContext = null,
-        call: fn (ServerType, ?ClientContext, io_uring_cqe) anyerror!void,
+        call: fn (ServerType, ?ClientContext, io_uring_cqe) anyerror!void = undefined,
 
         next: ?*Self = null,
 
@@ -30,12 +31,14 @@ pub fn Callback(comptime ServerType: type, comptime ClientContext: type) type {
         /// When the server loop is processing CQEs it will use the callback and then release it with put().
         pub const Pool = struct {
             allocator: mem.Allocator,
+            server: ServerType,
             nb: usize,
             free_list: ?*Self,
 
             pub fn init(allocator: mem.Allocator, server: ServerType, nb: usize) !Pool {
                 var res = Pool{
                     .allocator = allocator,
+                    .server = server,
                     .nb = nb,
                     .free_list = null,
                 };
@@ -46,9 +49,6 @@ pub fn Callback(comptime ServerType: type, comptime ClientContext: type) type {
                 while (i < nb) : (i += 1) {
                     const callback = try allocator.create(Self);
                     callback.* = .{
-                        .server = server,
-                        .client_context = undefined,
-                        .call = undefined,
                         .next = res.free_list,
                     };
                     res.free_list = callback;
@@ -85,9 +85,10 @@ pub fn Callback(comptime ServerType: type, comptime ClientContext: type) type {
             ///   * fn(ServerType, ClientContext, io_uring_cqe)
             ///
             /// If `cb` takes a ClientContext `args` must be a tuple with at least the first element being a ClientContext.
-            pub fn get(self: *Pool, comptime cb: anytype, args: anytype) !*Self {
+            fn get(self: *Pool, comptime cb: anytype, client_context: ?ClientContext) !*Self {
                 const ret = self.free_list orelse return error.OutOfCallback;
                 self.free_list = ret.next;
+                ret.next = null;
 
                 // Provide a wrapper based on the callback function.
 
@@ -101,10 +102,10 @@ pub fn Callback(comptime ServerType: type, comptime ClientContext: type) type {
                             expectFuncArgType(func_args, 2, io_uring_cqe);
                         }
 
-                        ret.client_context = args[0];
+                        ret.client_context = client_context;
                         ret.call = struct {
-                            fn wrapper(server: ServerType, client_context: ?ClientContext, cqe: io_uring_cqe) anyerror!void {
-                                return cb(server, client_context.?, cqe);
+                            fn wrapper(server: ServerType, wrapper_client_context: ?ClientContext, cqe: io_uring_cqe) anyerror!void {
+                                return cb(server, wrapper_client_context.?, cqe);
                             }
                         }.wrapper;
                     },
@@ -116,8 +117,7 @@ pub fn Callback(comptime ServerType: type, comptime ClientContext: type) type {
 
                         ret.client_context = null;
                         ret.call = struct {
-                            fn wrapper(server: ServerType, client_context: ?ClientContext, cqe: io_uring_cqe) anyerror!void {
-                                _ = client_context;
+                            fn wrapper(server: ServerType, _: ?ClientContext, cqe: io_uring_cqe) anyerror!void {
                                 return cb(server, cqe);
                             }
                         }.wrapper;
@@ -125,16 +125,138 @@ pub fn Callback(comptime ServerType: type, comptime ClientContext: type) type {
                     else => @compileError("invalid callback function " ++ @typeName(@TypeOf(cb))),
                 }
 
-                ret.next = null;
-
                 return ret;
             }
 
             /// Reset the callback and puts it back into the pool.
             pub fn put(self: *Pool, callback: *Self) void {
                 callback.client_context = null;
+                callback.call = undefined;
+
                 callback.next = self.free_list;
                 self.free_list = callback;
+            }
+
+            ///
+            ///
+            ///
+            pub fn accept(
+                self: *Pool,
+                comptime cb: anytype,
+                fd: os.socket_t,
+                peer_addr: *os.sockaddr,
+                peer_addr_size: *os.socklen_t,
+                flags: u32,
+            ) !*io_uring_sqe {
+                var ret = try self.get(cb, null);
+                return self.server.ring.accept(
+                    @ptrToInt(ret),
+                    fd,
+                    peer_addr,
+                    peer_addr_size,
+                    flags,
+                );
+            }
+
+            pub fn close(
+                self: *Pool,
+                comptime cb: anytype,
+                client_context: ?ClientContext,
+                fd: os.fd_t,
+            ) !*io_uring_sqe {
+                var ret = try self.get(cb, client_context);
+                return self.server.ring.close(
+                    @ptrToInt(ret),
+                    fd,
+                );
+            }
+
+            pub fn linkTimeout(
+                self: *Pool,
+                comptime cb: anytype,
+                timeout: *os.linux.kernel_timespec,
+                flags: u32,
+            ) !*io_uring_sqe {
+                var ret = try self.get(cb, null);
+                return self.server.ring.link_timeout(
+                    @ptrToInt(ret),
+                    timeout,
+                    flags,
+                );
+            }
+
+            pub fn read(
+                self: *Pool,
+                comptime cb: anytype,
+                client_context: ?ClientContext,
+                fd: os.fd_t,
+                buffer: []u8,
+                offset: u64,
+            ) !*io_uring_sqe {
+                var ret = try self.get(cb, client_context);
+                return self.server.ring.read(
+                    @ptrToInt(ret),
+                    fd,
+                    buffer,
+                    offset,
+                );
+            }
+
+            pub fn write(
+                self: *Pool,
+                comptime cb: anytype,
+                client_context: ?ClientContext,
+                fd: os.fd_t,
+                buffer: []u8,
+                offset: u64,
+            ) !*io_uring_sqe {
+                var ret = try self.get(cb, client_context);
+                return self.server.ring.write(
+                    @ptrToInt(ret),
+                    fd,
+                    buffer,
+                    offset,
+                );
+            }
+
+            pub fn openat(
+                self: *Pool,
+                comptime cb: anytype,
+                client_context: ?ClientContext,
+                fd: os.fd_t,
+                path: [:0]const u8,
+                flags: u32,
+                mode: os.mode_t,
+            ) !*io_uring_sqe {
+                var ret = try self.get(cb, client_context);
+                return self.server.ring.openat(
+                    @ptrToInt(ret),
+                    fd,
+                    path,
+                    flags,
+                    mode,
+                );
+            }
+
+            pub fn statx(
+                self: *Pool,
+                comptime cb: anytype,
+                client_context: ?ClientContext,
+                fd: os.fd_t,
+                path: [:0]const u8,
+                flags: u32,
+                mask: u32,
+                buf: *os.linux.Statx,
+            ) !*io_uring_sqe {
+                var ret = try self.get(cb, client_context);
+                return self.server.ring.statx(
+                    @ptrToInt(ret),
+                    fd,
+                    path,
+                    flags,
+                    mask,
+                    buf,
+                );
             }
         };
     };
