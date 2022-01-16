@@ -160,9 +160,7 @@ const TestHarness = struct {
         fn deinit(self: *Self) void {
             // Wait for the server to finish
             self.running.store(false, .SeqCst);
-            std.debug.print("héhé\n", .{});
             self.thread.join();
-            std.debug.print("haha\n", .{});
 
             // Clean up the server
             self.server.deinit();
@@ -182,9 +180,6 @@ const TestHarness = struct {
         }
 
         fn onRead(server: *httpserver.TCPServer(*Self), client: *httpserver.TCPClientState, cqe: io_uring_cqe) !void {
-            std.debug.print("running: {s}\n", .{server.running.load(.SeqCst)});
-            if (!server.running.load(.SeqCst)) return;
-
             const self = @fieldParentPtr(TestHarness.TCP, "server", server);
 
             switch (cqe.err()) {
@@ -250,6 +245,7 @@ const TestHarness = struct {
 
             client.reset();
 
+            if (!server.running.load(.SeqCst)) return;
             _ = try server.read(client, client.fd, 0, onRead);
         }
     };
