@@ -1639,8 +1639,6 @@ pub fn TCPServer(comptime Context: type) type {
             // TODO(vincent): how should we handle EAGAIN and EINTR ? right now they will shutdown the server.
             const cqe_count = try self.ring.copy_cqes(self.cqes, @intCast(u32, nr));
 
-            std.debug.print("count: {d}\n", .{self.pending});
-
             for (self.cqes[0..cqe_count]) |cqe| {
                 debug.assert(cqe.user_data != 0);
 
@@ -1660,7 +1658,6 @@ pub fn TCPServer(comptime Context: type) type {
             }
 
             self.pending -= cqe_count;
-            std.debug.print("done pending: {d}\n", .{self.pending});
 
             return cqe_count;
         }
@@ -1685,14 +1682,10 @@ pub fn TCPServer(comptime Context: type) type {
 
             _ = try self.submit(0);
 
-            std.debug.print("yhaahahah\n", .{});
             while (self.pending > 0) {
-                std.debug.print("pending: {d}\n", .{self.pending});
                 _ = try self.submit(0);
-                std.debug.print("pendinghaha: {d}\n", .{self.pending});
                 _ = try self.processCompletions(self.pending);
             }
-            std.debug.print("gg\n", .{});
         }
 
         fn handleCallbackError(self: *Self, client_opt: ?*TCPClientState, err: anyerror) void {
