@@ -1408,3 +1408,457 @@ pub fn Server(comptime Context: type) type {
         }
     };
 }
+
+pub const TCPClientState = struct {
+    gpa: mem.Allocator,
+
+    /// peer information associated with this client
+    peer: Peer,
+    fd: os.socket_t,
+
+    // Buffer and allocator used for small allocations (nul-terminated path, integer to int conversions etc).
+    temp_buffer: [128]u8 = undefined,
+    temp_buffer_fba: heap.FixedBufferAllocator = undefined,
+
+    // TODO(vincent): prevent going over the max_buffer_size somehow ("limiting" allocator ?)
+    // TODO(vincent): right now we always use clearRetainingCapacity() which may keep a lot of memory
+    // allocated for no reason.
+    // Implement some sort of statistics to determine if we should release memory, for example:
+    //  * max size used by the last 100 requests for reads or writes
+    //  * duration without any request before releasing everything
+    buffer: std.ArrayList(u8),
+
+    // non-null if the client was able to acquire a registered file descriptor.
+    registered_fd: ?i32 = null,
+
+    pub fn init(self: *TCPClientState, allocator: mem.Allocator, peer_addr: net.Address, client_fd: os.socket_t, max_buffer_size: usize) !void {
+        self.* = .{
+            .gpa = allocator,
+            .peer = .{
+                .addr = peer_addr,
+            },
+            .fd = client_fd,
+            .buffer = undefined,
+        };
+        self.temp_buffer_fba = heap.FixedBufferAllocator.init(&self.temp_buffer);
+
+        self.buffer = try std.ArrayList(u8).initCapacity(self.gpa, max_buffer_size);
+    }
+
+    pub fn deinit(self: *TCPClientState) void {
+        self.buffer.deinit();
+    }
+
+    pub fn reset(self: *TCPClientState) void {
+        self.buffer.clearRetainingCapacity();
+    }
+};
+
+pub fn TCPServer(comptime Context: type) type {
+    return struct {
+        const Self = @This();
+        const CallbackType = Callback(*Self, *TCPClientState);
+
+        /// allocator used to allocate each client state
+        root_allocator: mem.Allocator,
+
+        /// uring dedicated to this server object.
+        ring: IO_Uring,
+
+        /// options controlling the behaviour of the server.
+        options: ServerOptions,
+
+        /// indicates if the server should continue running.
+        /// This is _not_ owned by the server but by the caller.
+        running: *Atomic(bool),
+
+        /// This field lets us keep track of the number of pending operations which is necessary to implement drain() properly.
+        ///
+        /// Note that this is different than the number of SQEs pending in the submission queue or CQEs pending in the completion queue.
+        /// For example an accept operation which has been consumed by the kernel but hasn't accepted any connection yet must be considered
+        /// pending for us but it's not pending in either the submission or completion queue.
+        /// Another example is a timeout: once accepted and until expired it won't be available in the completion queue.
+        pending: usize = 0,
+
+        /// Listener state
+        listener: struct {
+            /// server file descriptor used for accept(2) operation.
+            /// Must have had bind(2) and listen(2) called on it before being passed to `init()`.
+            server_fd: os.socket_t,
+
+            /// indicates if an accept operation is pending.
+            accept_waiting: bool = false,
+
+            /// the timeout data for the link_timeout operation linked to the previous accept.
+            ///
+            /// Each accept operation has a following timeout linked to it; this works in such a way
+            /// that if the timeout has expired the accept operation is cancelled and if the accept has finished
+            /// before the timeout then the timeout operation is cancelled.
+            ///
+            /// This is useful to run the main loop for a bounded duration.
+            timeout: os.linux.kernel_timespec = .{
+                .tv_sec = 0,
+                .tv_nsec = 0,
+            },
+
+            // Next peer we're accepting.
+            // Will be valid after a successful CQE for an accept operation.
+            peer_addr: net.Address = net.Address{
+                .any = undefined,
+            },
+            peer_addr_size: u32 = @sizeOf(os.sockaddr),
+        },
+
+        /// CQEs storage
+        cqes: []io_uring_cqe = undefined,
+
+        /// List of client states.
+        /// A new state is created for each socket accepted and destroyed when the socket is closed for any reason.
+        clients: std.ArrayList(*TCPClientState),
+
+        /// Free list of callback objects necessary for working with the uring.
+        /// See the documentation of Callback.Pool.
+        callbacks: CallbackType.Pool,
+
+        /// Set of registered file descriptors for use with the uring.
+        ///
+        /// TODO(vincent): make use of this somehow ? right now it crashes the kernel.
+        registered_fds: RegisteredFileDescriptors,
+
+        user_context: Context,
+
+        /// initializes a Server object.
+        pub fn init(
+            self: *Self,
+            /// General purpose allocator which will:
+            /// * allocate all client states (including request/response bodies).
+            /// * allocate the callback pool
+            /// Depending on the workload the allocator can be hit quite often (for example if all clients close their connection).
+            allocator: mem.Allocator,
+            /// controls the behaviour of the server (max number of connections, max buffer size, etc).
+            options: ServerOptions,
+            /// owned by the caller and indicates if the server should shutdown properly.
+            running: *Atomic(bool),
+            /// must be a socket properly initialized with listen(2) and bind(2) which will be used for accept(2) operations.
+            server_fd: os.socket_t,
+            /// user provided context that will be passed to the request handlers.
+            user_context: Context,
+        ) !void {
+            // TODO(vincent): probe for available features for io_uring ?
+
+            self.* = .{
+                .root_allocator = allocator,
+                .ring = try std.os.linux.IO_Uring.init(options.max_ring_entries, 0),
+                .options = options,
+                .running = running,
+                .listener = .{
+                    .server_fd = server_fd,
+                },
+                .cqes = try allocator.alloc(io_uring_cqe, options.max_ring_entries),
+                .clients = try std.ArrayList(*TCPClientState).initCapacity(allocator, options.max_connections),
+                .callbacks = undefined,
+                .registered_fds = .{},
+                .user_context = user_context,
+            };
+
+            self.callbacks = try CallbackType.Pool.init(allocator, self, options.max_ring_entries);
+
+            try self.registered_fds.register(&self.ring);
+        }
+
+        pub fn deinit(self: *Self) void {
+            for (self.clients.items) |client| {
+                client.deinit();
+                self.root_allocator.destroy(client);
+            }
+            self.clients.deinit();
+
+            self.callbacks.deinit();
+            self.root_allocator.free(self.cqes);
+            self.ring.deinit();
+        }
+
+        /// Runs the main loop until the `running` boolean is false.
+        ///
+        /// `accept_timeout` controls how much time the loop can wait for an accept operation to finish.
+        /// This duration is the lower bound duration before the main loop can stop when `running` is false;
+        pub fn run(self: *Self, accept_timeout: u63, comptime accept_cb: fn (*Self, *TCPClientState) anyerror!void) !void {
+            // TODO(vincent): we don't properly shutdown the peer sockets; we should do that.
+            // This can be done using standard close(2) calls I think.
+
+            while (self.running.load(.SeqCst)) {
+                // first step: (maybe) submit and accept with a link_timeout linked to it.
+                //
+                // Nothing is submitted if:
+                // * a previous accept operation is already waiting.
+                // * the number of connected clients reached the predefined limit.
+                try self.maybeAccept(accept_timeout, accept_cb);
+
+                // second step: submit to the kernel all previous queued SQE.
+                //
+                // SQEs might be queued by the maybeAccept call above or by the processCompletions call below, but
+                // obviously in that case its SQEs queued from the _previous iteration_ that are submitted to the kernel.
+                //
+                // Additionally we wait for at least 1 CQE to be available, if none is available the thread will be put to sleep by the kernel.
+                // Note that this doesn't work if the uring is setup with busy-waiting.
+                const submitted = try self.submit(1);
+
+                // third step: process all available CQEs.
+                //
+                // This asks the kernel to wait for at least `submitted` CQE to be available.
+                // Since we successfully submitted that many SQEs it is guaranteed we will _at some point_
+                // get that many CQEs but there's no guarantee they will be available instantly; if the
+                // kernel lags in processing the SQEs we can have a delay in getting the CQEs.
+                // This is further accentuated by the number of pending SQEs we can have.
+                //
+                // One example would be submitting a lot of fdatasync operations on slow devices.
+                _ = try self.processCompletions(submitted);
+            }
+            try self.drain();
+        }
+
+        /// Submits all pending SQE to the kernel, if any.
+        /// Waits for `nr` events to be completed before returning (0 means don't wait).
+        ///
+        /// This also increments `pending` by the number of events submitted.
+        ///
+        /// Returns the number of events submitted.
+        pub fn submit(self: *Self, nr: u32) !usize {
+            const n = try self.ring.submit_and_wait(nr);
+            self.pending += n;
+            return n;
+        }
+
+        /// Process all ready CQEs, if any.
+        /// Waits for `nr` events to be completed before processing begins (0 means don't wait).
+        ///
+        /// This also decrements `pending` by the number of events processed.
+        ///
+        /// Returnsd the number of events processed.
+        pub fn processCompletions(self: *Self, nr: usize) !usize {
+            // TODO(vincent): how should we handle EAGAIN and EINTR ? right now they will shutdown the server.
+            const cqe_count = try self.ring.copy_cqes(self.cqes, @intCast(u32, nr));
+
+            std.debug.print("count: {d}\n", .{self.pending});
+
+            for (self.cqes[0..cqe_count]) |cqe| {
+                debug.assert(cqe.user_data != 0);
+
+                // We know that a SQE/CQE is _always_ associated with a pointer of type Callback.
+
+                var cb = @intToPtr(*CallbackType, cqe.user_data);
+                defer self.callbacks.put(cb);
+
+                // Call the provided function with the proper context.
+                //
+                // Note that while the callback function signature can return an error we don't bubble them up
+                // simply because we can't shutdown the server due to a processing error.
+
+                cb.call(cb.server, cb.client_context, cqe) catch |err| {
+                    self.handleCallbackError(cb.client_context, err);
+                };
+            }
+
+            self.pending -= cqe_count;
+            std.debug.print("done pending: {d}\n", .{self.pending});
+
+            return cqe_count;
+        }
+
+        /// Continuously submit SQEs and process completions until there are
+        /// no more pending operations.
+        ///
+        /// This must be called when shutting down.
+        pub fn drain(self: *Self) !void {
+            // This call is only useful if pending > 0.
+            //
+            // It is currently impossible to have pending == 0 after an iteration of the main loop because:
+            // * if no accept waiting maybeAccept `pending` will increase by 2.
+            // * if an accept is waiting but we didn't get a connection, `pending` must still be >= 1.
+            // * if an accept is waiting and we got a connection, the previous processCompletions call
+            //   increased `pending` while doing request processing.
+            // * if no accept waiting and too many connections, the previous processCompletions call
+            //   increased `pending` while doing request processing.
+            //
+            // But to be extra sure we do this submit call outside the drain loop to ensure we have flushed all queued SQEs
+            // submitted in the last processCompletions call in the main loop.
+
+            _ = try self.submit(0);
+
+            std.debug.print("yhaahahah\n", .{});
+            while (self.pending > 0) {
+                std.debug.print("pending: {d}\n", .{self.pending});
+                _ = try self.submit(0);
+                std.debug.print("pendinghaha: {d}\n", .{self.pending});
+                _ = try self.processCompletions(self.pending);
+            }
+            std.debug.print("gg\n", .{});
+        }
+
+        fn handleCallbackError(self: *Self, client_opt: ?*TCPClientState, err: anyerror) void {
+            if (err == error.Canceled) return;
+
+            if (client_opt) |client| {
+                switch (err) {
+                    error.ConnectionResetByPeer => {
+                        logger.info("ctx#{s:<4} client fd={d} disconnected", .{ self.user_context, client.fd });
+                    },
+                    error.UnexpectedEOF => {
+                        logger.debug("ctx#{s:<4} unexpected eof", .{self.user_context});
+                    },
+                    else => {
+                        logger.err("ctx#{s:<4} unexpected error {s}", .{ self.user_context, err });
+                    },
+                }
+
+                // _ = self.submitClose(client, client.fd, onCloseClient) catch {};
+            } else {
+                logger.err("ctx#{s:<4} unexpected error {s}", .{ self.user_context, err });
+            }
+        }
+
+        pub fn maybeAccept(self: *Self, accept_timeout: u63, comptime accept_cb: fn (*Self, *TCPClientState) anyerror!void) !void {
+            if (!self.running.load(.SeqCst)) {
+                // we must stop: stop accepting connections.
+                return;
+            }
+            if (self.listener.accept_waiting or self.clients.items.len >= self.options.max_connections) {
+                return;
+            }
+
+            var tmp = try self.callbacks.get(
+                struct {
+                    fn wrapper(server: *Self, cqe: io_uring_cqe) anyerror!void {
+                        defer server.listener.accept_waiting = false;
+
+                        switch (cqe.err()) {
+                            .SUCCESS => {},
+                            .INTR => {
+                                logger.debug("ctx#{s:<4} ON ACCEPT interrupted", .{server.user_context});
+                                return error.Canceled;
+                            },
+                            .CANCELED => {
+                                if (build_options.debug_accepts) {
+                                    logger.debug("ctx#{s:<4} ON ACCEPT timed out", .{server.user_context});
+                                }
+                                return error.Canceled;
+                            },
+                            else => |err| {
+                                logger.err("ctx#{s:<4} ON ACCEPT unexpected errno={}", .{ server.user_context, err });
+                                return error.Unexpected;
+                            },
+                        }
+
+                        logger.debug("ctx#{s:<4} ON ACCEPT accepting connection from {s}", .{ server.user_context, server.listener.peer_addr });
+
+                        const client_fd = @intCast(os.socket_t, cqe.res);
+
+                        var client = try server.root_allocator.create(TCPClientState);
+                        errdefer server.root_allocator.destroy(client);
+
+                        try client.init(
+                            server.root_allocator,
+                            server.listener.peer_addr,
+                            client_fd,
+                            server.options.max_buffer_size,
+                        );
+                        errdefer client.deinit();
+
+                        try server.clients.append(client);
+
+                        //
+
+                        return accept_cb(server, client);
+                    }
+                }.wrapper,
+                .{},
+            );
+
+            var sqe = try self.ring.accept(
+                @ptrToInt(tmp),
+                self.listener.server_fd,
+                &self.listener.peer_addr.any,
+                &self.listener.peer_addr_size,
+                0,
+            );
+            sqe.flags |= os.linux.IOSQE_IO_LINK;
+
+            self.listener.timeout.tv_sec = 0;
+            self.listener.timeout.tv_nsec = accept_timeout;
+
+            tmp = try self.callbacks.get(
+                struct {
+                    fn wrapper(server: *Self, cqe: io_uring_cqe) anyerror!void {
+                        switch (cqe.err()) {
+                            .CANCELED => {
+                                if (build_options.debug_accepts) {
+                                    logger.debug("ctx#{s:<4} ON LINK TIMEOUT operation finished, timeout canceled", .{server.user_context});
+                                }
+                            },
+                            .ALREADY => {
+                                if (build_options.debug_accepts) {
+                                    logger.debug("ctx#{s:<4} ON LINK TIMEOUT operation already finished before timeout expired", .{server.user_context});
+                                }
+                            },
+                            .TIME => {
+                                if (build_options.debug_accepts) {
+                                    logger.debug("ctx#{s:<4} ON LINK TIMEOUT timeout finished before accept", .{server.user_context});
+                                }
+                            },
+                            else => |err| {
+                                logger.err("ctx#{s:<4} ON LINK TIMEOUT unexpected errno={}", .{ server.user_context, err });
+                                return error.Unexpected;
+                            },
+                        }
+                    }
+                }.wrapper,
+                .{},
+            );
+            _ = try self.ring.link_timeout(
+                @ptrToInt(tmp),
+                &self.listener.timeout,
+                0,
+            );
+
+            self.listener.accept_waiting = true;
+        }
+
+        pub fn read(self: *Self, client: *TCPClientState, fd: os.socket_t, offset: u64, comptime cb: anytype) !*io_uring_sqe {
+            logger.debug("ctx#{s:<4} addr={s} submitting read from {d}, offset {d}", .{
+                self.user_context,
+                client.peer.addr,
+                fd,
+                offset,
+            });
+
+            var tmp = try self.callbacks.get(cb, .{client});
+
+            return self.ring.read(
+                @ptrToInt(tmp),
+                fd,
+                &client.temp_buffer,
+                offset,
+            );
+        }
+
+        pub fn write(self: *Self, client: *TCPClientState, fd: os.fd_t, offset: u64, comptime cb: anytype) !*io_uring_sqe {
+            logger.debug("ctx#{s:<4} addr={s} submitting write of {s} to {d}, offset {d}, data=\"{s}\"", .{
+                self.user_context,
+                client.peer.addr,
+                fmt.fmtIntSizeBin(client.buffer.items.len),
+                fd,
+                offset,
+                fmt.fmtSliceEscapeLower(client.buffer.items),
+            });
+
+            var tmp = try self.callbacks.get(cb, .{client});
+
+            return self.ring.write(
+                @ptrToInt(tmp),
+                fd,
+                client.buffer.items,
+                offset,
+            );
+        }
+    };
+}
