@@ -132,6 +132,7 @@ pub fn Callback(comptime ServerType: type, comptime ClientContext: type) type {
 
             /// Reset the callback and puts it back into the pool.
             pub fn put(self: *Pool, callback: *Self) void {
+                callback.client_context = null;
                 callback.next = self.free_list;
                 self.free_list = callback;
             }
