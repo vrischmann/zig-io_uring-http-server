@@ -23,7 +23,7 @@ const logger = std.log.scoped(.main);
 
 var global_running: Atomic(bool) = Atomic(bool).init(true);
 
-fn addSignalHandlers() void {
+fn addSignalHandlers() !void {
     // Ignore broken pipes
     {
         var act = os.Sigaction{
@@ -33,7 +33,7 @@ fn addSignalHandlers() void {
             .mask = os.empty_sigset,
             .flags = 0,
         };
-        os.sigaction(os.SIG.PIPE, &act, null);
+        try os.sigaction(os.SIG.PIPE, &act, null);
     }
 
     // Catch SIGINT/SIGTERM for proper shutdown
@@ -51,8 +51,8 @@ fn addSignalHandlers() void {
             .mask = os.empty_sigset,
             .flags = 0,
         };
-        os.sigaction(os.SIG.TERM, &act, null);
-        os.sigaction(os.SIG.INT, &act, null);
+        try os.sigaction(os.SIG.TERM, &act, null);
+        try os.sigaction(os.SIG.INT, &act, null);
     }
 }
 
@@ -131,7 +131,7 @@ pub fn main() anyerror!void {
     // var logging_allocator = heap.loggingAllocator(gpa.allocator());
     // var allocator = logging_allocator.allocator();
 
-    addSignalHandlers();
+    try addSignalHandlers();
 
     // Create the server socket
     const server_fd = try httpserver.createSocket(listen_port);
