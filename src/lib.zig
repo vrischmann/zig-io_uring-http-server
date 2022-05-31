@@ -1345,7 +1345,7 @@ pub fn Server(comptime Context: type) type {
             return self.ring.read(
                 @ptrToInt(tmp),
                 fd,
-                &client.temp_buffer,
+                .{ .buffer = &client.temp_buffer },
                 offset,
             );
         }
