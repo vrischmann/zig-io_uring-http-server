@@ -18,6 +18,7 @@ const io_uring_cqe = std.os.linux.io_uring_cqe;
 const io_uring_sqe = std.os.linux.io_uring_sqe;
 
 pub const createSocket = @import("io.zig").createSocket;
+const RegisteredFile = @import("io.zig").RegisteredFile;
 const RegisteredFileDescriptors = @import("io.zig").RegisteredFileDescriptors;
 const Callback = @import("callback.zig").Callback;
 
@@ -324,6 +325,21 @@ pub fn RequestHandler(comptime Context: type) type {
     return fn (Context, mem.Allocator, Peer, Request) anyerror!Response;
 }
 
+const ResponseStateFileDescriptor = union(enum) {
+    direct: os.fd_t,
+    registered: os.fd_t,
+
+    pub fn format(self: ResponseStateFileDescriptor, comptime fmt_string: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = options;
+
+        if (comptime !mem.eql(u8, "s", fmt_string)) @compileError("format string must be s");
+        switch (self) {
+            .direct => |fd| try writer.print("(direct fd={d})", .{fd}),
+            .registered => |fd| try writer.print("(registered fd={d})", .{fd}),
+        }
+    }
+};
+
 const ClientState = struct {
     const RequestState = struct {
         parse_result: ParseRequestResult = .{
@@ -344,7 +360,7 @@ const ClientState = struct {
         /// state used when we need to send a static file from the filesystem.
         file: struct {
             path: [:0]u8 = undefined,
-            fd: os.fd_t = -1,
+            fd: ResponseStateFileDescriptor = undefined,
             statx_buf: os.linux.Statx = undefined,
 
             offset: usize = 0,
@@ -371,9 +387,6 @@ const ClientState = struct {
 
     request_state: RequestState = .{},
     response_state: ResponseState = .{},
-
-    // non-null if the client was able to acquire a registered file descriptor.
-    registered_fd: ?i32 = null,
 
     pub fn init(self: *ClientState, allocator: mem.Allocator, peer_addr: net.Address, client_fd: os.socket_t, max_buffer_size: usize) !void {
         self.* = .{
@@ -406,7 +419,7 @@ const ClientState = struct {
         self.buffer.clearRetainingCapacity();
     }
 
-    fn writeResponsePreambule(self: *ClientState, content_length: ?usize) !void {
+    fn startWritingResponse(self: *ClientState, content_length: ?usize) !void {
         var writer = self.buffer.writer();
 
         try writer.print("HTTP/1.1 {d} {s}\n", .{
@@ -510,6 +523,7 @@ pub fn Server(comptime Context: type) type {
         ///
         /// TODO(vincent): make use of this somehow ? right now it crashes the kernel.
         registered_fds: RegisteredFileDescriptors,
+        registered_files: std.StringHashMap(RegisteredFile),
 
         user_context: Context,
         handler: RequestHandler(Context),
@@ -547,6 +561,7 @@ pub fn Server(comptime Context: type) type {
                 .clients = try std.ArrayList(*ClientState).initCapacity(allocator, options.max_connections),
                 .callbacks = undefined,
                 .registered_fds = .{},
+                .registered_files = std.StringHashMap(RegisteredFile).init(allocator),
                 .user_context = user_context,
                 .handler = handler,
             };
@@ -557,6 +572,12 @@ pub fn Server(comptime Context: type) type {
         }
 
         pub fn deinit(self: *Self) void {
+            var registered_files_iterator = self.registered_files.iterator();
+            while (registered_files_iterator.next()) |entry| {
+                self.root_allocator.free(entry.key_ptr.*);
+            }
+            self.registered_files.deinit();
+
             for (self.clients.items) |client| {
                 client.deinit();
                 self.root_allocator.destroy(client);
@@ -857,7 +878,6 @@ pub fn Server(comptime Context: type) type {
             });
 
             // Cleanup resources
-            releaseRegisteredFileDescriptor(self, client);
             client.deinit();
             self.root_allocator.destroy(client);
 
@@ -978,7 +998,7 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn onCloseResponseFile(self: *Self, client: *ClientState, cqe: os.linux.io_uring_cqe) !void {
-            logger.debug("ctx#{s:<4} addr={s} ON CLOSE RESPONSE FILE fd={}", .{
+            logger.debug("ctx#{s:<4} addr={s} ON CLOSE RESPONSE FILE fd={s}", .{
                 self.user_context,
                 client.peer.addr,
                 client.response_state.file.fd,
@@ -1039,11 +1059,16 @@ pub fn Server(comptime Context: type) type {
 
                 client.buffer.clearRetainingCapacity();
 
-                if (client.registered_fd) |registered_fd| {
-                    var sqe = try self.submitRead(client, registered_fd, 0, onReadResponseFile);
-                    sqe.flags |= os.linux.IOSQE_FIXED_FILE;
-                } else {
-                    _ = try self.submitRead(client, client.response_state.file.fd, 0, onReadResponseFile);
+                const offset = client.response_state.file.offset;
+
+                switch (client.response_state.file.fd) {
+                    .direct => |fd| {
+                        _ = try self.submitRead(client, fd, offset, onReadResponseFile);
+                    },
+                    .registered => |fd| {
+                        var sqe = try self.submitRead(client, fd, offset, onReadResponseFile);
+                        sqe.flags |= os.linux.IOSQE_FIXED_FILE;
+                    },
                 }
                 return;
             }
@@ -1055,10 +1080,14 @@ pub fn Server(comptime Context: type) type {
 
             // Response file written, read the next request
 
-            releaseRegisteredFileDescriptor(self, client);
             // Close the response file descriptor
-            _ = try self.submitClose(client, client.response_state.file.fd, onCloseResponseFile);
-            client.response_state.file.fd = -1;
+            switch (client.response_state.file.fd) {
+                .direct => |fd| {
+                    _ = try self.submitClose(client, fd, onCloseResponseFile);
+                    client.response_state.file.fd = .{ .direct = -1 };
+                },
+                .registered => {},
+            }
 
             // Reset the client state
             client.reset();
@@ -1067,8 +1096,6 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn onReadResponseFile(self: *Self, client: *ClientState, cqe: io_uring_cqe) !void {
-            debug.assert(client.buffer.items.len > 0);
-
             switch (cqe.err()) {
                 .SUCCESS => {},
                 else => |err| {
@@ -1084,7 +1111,7 @@ pub fn Server(comptime Context: type) type {
 
             client.response_state.file.offset += read;
 
-            logger.debug("ctx#{s:<4} addr={s} ON READ RESPONSE FILE read of {d} bytes from {d} succeeded, data=\"{s}\"", .{
+            logger.debug("ctx#{s:<4} addr={s} ON READ RESPONSE FILE read of {d} bytes from {s} succeeded, data=\"{s}\"", .{
                 self.user_context,
                 client.peer.addr,
                 read,
@@ -1111,7 +1138,7 @@ pub fn Server(comptime Context: type) type {
                 },
             }
 
-            logger.debug("ctx#{s:<4} addr={s} ON STATX RESPONSE FILE path=\"{s}\" fd={}, size={s}", .{
+            logger.debug("ctx#{s:<4} addr={s} ON STATX RESPONSE FILE path=\"{s}\" fd={s}, size={s}", .{
                 self.user_context,
                 client.peer.addr,
                 client.response_state.file.path,
@@ -1123,15 +1150,59 @@ pub fn Server(comptime Context: type) type {
             // This will be written to the socket on the next write operation following
             // the first read operation for this file.
             client.response_state.status_code = .ok;
-            try client.writeResponsePreambule(client.response_state.file.statx_buf.size);
+            try client.startWritingResponse(client.response_state.file.statx_buf.size);
 
-            // Now read the response file
-            if (client.registered_fd) |registered_fd| {
+            // If the file has already been registered, use its registered file descriptor.
+            if (self.registered_files.get(client.response_state.file.path)) |entry| {
+                logger.debug("ctx#{s:<4} addr={s} ON STATX RESPONSE FILE file descriptor already registered, path=\"{s}\" registered fd={d}", .{
+                    self.user_context,
+                    client.peer.addr,
+                    client.response_state.file.path,
+                    entry.fd,
+                });
+
+                var sqe = try self.submitRead(client, entry.fd, 0, onReadResponseFile);
+                sqe.flags |= os.linux.IOSQE_FIXED_FILE;
+
+                return;
+            }
+
+            // The file has not yet been registered, try to do it
+
+            // Assert the file descriptor is of type .direct, if it isn't it's a bug.
+            debug.assert(client.response_state.file.fd == .direct);
+            const fd = client.response_state.file.fd.direct;
+
+            if (self.registered_fds.acquire(fd)) |registered_fd| {
+                // We were able to acquire a registered file descriptor, make use of it.
+
+                logger.debug("ctx#{s:<4} addr={s} ON STATX RESPONSE FILE registered file descriptor, path=\"{s}\" registered fd={d}", .{
+                    self.user_context,
+                    client.peer.addr,
+                    client.response_state.file.path,
+                    registered_fd,
+                });
+
+                client.response_state.file.fd = .{ .registered = registered_fd };
+
+                try self.registered_fds.update(&self.ring);
+
+                var entry = try self.registered_files.getOrPut(client.response_state.file.path);
+                if (!entry.found_existing) {
+                    entry.key_ptr.* = try self.root_allocator.dupeZ(u8, client.response_state.file.path);
+                    entry.value_ptr.* = RegisteredFile{
+                        .fd = registered_fd,
+                        .size = client.response_state.file.statx_buf.size,
+                    };
+                }
+
                 var sqe = try self.submitRead(client, registered_fd, 0, onReadResponseFile);
                 sqe.flags |= os.linux.IOSQE_FIXED_FILE;
-            } else {
-                _ = try self.submitRead(client, client.response_state.file.fd, 0, onReadResponseFile);
+                return;
             }
+
+            // The file isn't registered and we weren't able to register it, do a standard read.
+            _ = try self.submitRead(client, fd, 0, onReadResponseFile);
         }
 
         fn onReadBody(self: *Self, client: *ClientState, cqe: io_uring_cqe) !void {
@@ -1207,31 +1278,11 @@ pub fn Server(comptime Context: type) type {
                 },
             }
 
-            client.response_state.file.fd = @intCast(os.fd_t, cqe.res);
+            client.response_state.file.fd = .{ .direct = @intCast(os.fd_t, cqe.res) };
 
-            logger.debug("ctx#{s:<4} addr={s} ON OPEN RESPONSE FILE fd={}", .{ self.user_context, client.peer.addr, client.response_state.file.fd });
+            logger.debug("ctx#{s:<4} addr={s} ON OPEN RESPONSE FILE fd={s}", .{ self.user_context, client.peer.addr, client.response_state.file.fd });
 
             client.temp_buffer_fba.reset();
-
-            // Try to acquire a registered file descriptor.
-            // NOTE(vincent): constantly updating the registered file descriptors crashes the kernel
-            // client.registered_fd = self.registered_fds.acquire(client.response_state.file.fd);
-            // if (client.registered_fd != null) {
-            //     try self.registered_fds.update(self.ring);
-            // }
-        }
-
-        fn releaseRegisteredFileDescriptor(self: *Self, client: *ClientState) void {
-            if (client.registered_fd) |registered_fd| {
-                self.registered_fds.release(registered_fd);
-                self.registered_fds.update(&self.ring) catch |err| {
-                    logger.err("ctx#{s:<4} unable to update registered file descriptors, err={}", .{
-                        self.user_context,
-                        err,
-                    });
-                };
-                client.registered_fd = null;
-            }
         }
 
         fn callHandler(self: *Self, client: *ClientState) !void {
@@ -1264,7 +1315,7 @@ pub fn Server(comptime Context: type) type {
                     client.response_state.status_code = res.status_code;
                     client.response_state.headers = res.headers;
 
-                    try client.writeResponsePreambule(res.data.len);
+                    try client.startWritingResponse(res.data.len);
                     try client.buffer.appendSlice(res.data);
 
                     _ = try self.submitWrite(client, client.fd, 0, onWriteResponseBuffer);
@@ -1274,23 +1325,45 @@ pub fn Server(comptime Context: type) type {
                     client.response_state.headers = res.headers;
                     client.response_state.file.path = try client.temp_buffer_fba.allocator().dupeZ(u8, res.path);
 
-                    var sqe = try self.submitOpenFile(
-                        client,
-                        client.response_state.file.path,
-                        os.linux.O.RDONLY | os.linux.O.NOFOLLOW,
-                        0644,
-                        onOpenResponseFile,
-                    );
-                    sqe.flags |= os.linux.IOSQE_IO_LINK;
+                    if (self.registered_files.get(client.response_state.file.path)) |registered_file| {
+                        logger.debug("ctx#{s:<4} addr={s} FILE path=\"{s}\" is already registered, fd={d}", .{
+                            self.user_context,
+                            client.peer.addr,
+                            client.response_state.file.path,
+                            registered_file.fd,
+                        });
 
-                    _ = try self.submitStatxFile(
-                        client,
-                        client.response_state.file.path,
-                        os.linux.AT.SYMLINK_NOFOLLOW,
-                        os.linux.STATX_SIZE,
-                        &client.response_state.file.statx_buf,
-                        onStatxResponseFile,
-                    );
+                        client.response_state.file.fd = .{ .registered = registered_file.fd };
+                        client.temp_buffer_fba.reset();
+
+                        // Prepare the preambule + headers.
+                        // This will be written to the socket on the next write operation following
+                        // the first read operation for this file.
+                        client.response_state.status_code = .ok;
+                        try client.startWritingResponse(registered_file.size);
+
+                        // Now read the response file
+                        var sqe = try self.submitRead(client, registered_file.fd, 0, onReadResponseFile);
+                        sqe.flags |= os.linux.IOSQE_FIXED_FILE;
+                    } else {
+                        var sqe = try self.submitOpenFile(
+                            client,
+                            client.response_state.file.path,
+                            os.linux.O.RDONLY | os.linux.O.NOFOLLOW,
+                            0644,
+                            onOpenResponseFile,
+                        );
+                        sqe.flags |= os.linux.IOSQE_IO_LINK;
+
+                        _ = try self.submitStatxFile(
+                            client,
+                            client.response_state.file.path,
+                            os.linux.AT.SYMLINK_NOFOLLOW,
+                            os.linux.STATX_SIZE,
+                            &client.response_state.file.statx_buf,
+                            onStatxResponseFile,
+                        );
+                    }
                 },
             }
         }
@@ -1304,7 +1377,7 @@ pub fn Server(comptime Context: type) type {
             const static_response = "Not Found";
 
             client.response_state.status_code = .not_found;
-            try client.writeResponsePreambule(static_response.len);
+            try client.startWritingResponse(static_response.len);
             try client.buffer.appendSlice(static_response);
 
             _ = try self.submitWrite(client, client.fd, 0, onWriteResponseBuffer);
