@@ -11,6 +11,11 @@ const logger = std.log.scoped(.io_helpers);
 // TODO(vincent): make this dynamic
 const max_connections = 128;
 
+pub const RegisteredFile = struct {
+    fd: os.fd_t,
+    size: u64,
+};
+
 /// Manages a set of registered file descriptors.
 /// The set size is fixed at compile time.
 ///
