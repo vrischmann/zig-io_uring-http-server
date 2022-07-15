@@ -998,6 +998,14 @@ pub fn Server(comptime Context: type) type {
 
             switch (cqe.err()) {
                 .SUCCESS => {},
+                .PIPE => {
+                    logger.err("ctx#{s:<4} addr={s} broken pipe", .{ self.user_context, client.peer.addr });
+                    return error.BrokenPipe;
+                },
+                .CONNRESET => {
+                    logger.err("ctx#{s:<4} addr={s} connection reset by peer", .{ self.user_context, client.peer.addr });
+                    return error.ConnectionResetByPeer;
+                },
                 else => |err| {
                     logger.err("ctx#{s:<4} addr={s} ON WRITE RESPONSE FILE unexpected errno={}", .{ self.user_context, client.peer.addr, err });
                     return error.Unexpected;
