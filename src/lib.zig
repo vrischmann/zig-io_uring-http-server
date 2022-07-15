@@ -337,9 +337,6 @@ const ClientState = struct {
 
     /// Holds state used to send a response to the client.
     const ResponseState = struct {
-        /// keeps track of the number of bytes that we written on the socket
-        written: usize = 0,
-
         /// status code and header are overwritable in the handler
         status_code: StatusCode = .ok,
         headers: []Header = &[_]Header{},
@@ -349,6 +346,8 @@ const ClientState = struct {
             path: [:0]u8 = undefined,
             fd: os.fd_t = -1,
             statx_buf: os.linux.Statx = undefined,
+
+            offset: usize = 0,
         } = .{},
     };
 
@@ -1017,8 +1016,6 @@ pub fn Server(comptime Context: type) type {
                 client.fd,
             });
 
-            client.response_state.written += written;
-
             if (written < client.buffer.items.len) {
                 // Short write, write the remaining data
 
@@ -1029,7 +1026,7 @@ pub fn Server(comptime Context: type) type {
                 return;
             }
 
-            if (client.response_state.written < client.response_state.file.statx_buf.size) {
+            if (client.response_state.file.offset < client.response_state.file.statx_buf.size) {
                 // More data to read from the file, submit another read
 
                 client.buffer.clearRetainingCapacity();
@@ -1077,11 +1074,14 @@ pub fn Server(comptime Context: type) type {
 
             const read = @intCast(usize, cqe.res);
 
-            logger.debug("ctx#{s:<4} addr={s} ON READ RESPONSE FILE read of {d} bytes from {d} succeeded", .{
+            client.response_state.file.offset += read;
+
+            logger.debug("ctx#{s:<4} addr={s} ON READ RESPONSE FILE read of {d} bytes from {d} succeeded, data=\"{s}\"", .{
                 self.user_context,
                 client.peer.addr,
                 read,
                 client.response_state.file.fd,
+                fmt.fmtSliceEscapeLower(client.temp_buffer[0..read]),
             });
 
             try client.buffer.appendSlice(client.temp_buffer[0..read]);
