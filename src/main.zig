@@ -73,7 +73,7 @@ const ServerContext = struct {
     fn handleRequest(self: *Self, per_request_allocator: mem.Allocator, peer: httpserver.Peer, req: httpserver.Request) anyerror!httpserver.Response {
         _ = per_request_allocator;
 
-        logger.debug("ctx#{d:<4} IN HANDLER addr={s} method: {s}, path: {s}, minor version: {d}, body: \"{s}\"", .{
+        logger.debug("ctx#{d:<4} IN HANDLER addr={s} method: {s}, path: {s}, minor version: {d}, body: \"{?s}\"", .{
             self.id,
             peer.addr,
             req.method.toString(),
