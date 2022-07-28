@@ -733,13 +733,13 @@ pub fn Server(comptime Context: type) type {
                         logger.debug("ctx#{s:<4} unexpected eof", .{self.user_context});
                     },
                     else => {
-                        logger.err("ctx#{s:<4} unexpected error {s}", .{ self.user_context, err });
+                        logger.err("ctx#{s:<4} unexpected error {!}", .{ self.user_context, err });
                     },
                 }
 
                 _ = self.submitClose(client, client.fd, onCloseClient) catch {};
             } else {
-                logger.err("ctx#{s:<4} unexpected error {s}", .{ self.user_context, err });
+                logger.err("ctx#{s:<4} unexpected error {!}", .{ self.user_context, err });
             }
         }
 
@@ -1387,7 +1387,7 @@ pub fn Server(comptime Context: type) type {
             // Try to find the content length. If there's one we switch to reading the body.
             const content_length = try client.request_state.parse_result.raw_request.getContentLength();
             if (content_length) |n| {
-                logger.debug("ctx#{s:<4} addr={s} content length: {d}", .{ self.user_context, client.peer.addr, content_length });
+                logger.debug("ctx#{s:<4} addr={s} content length: {d}", .{ self.user_context, client.peer.addr, n });
 
                 client.request_state.content_length = n;
                 client.refreshBody();
