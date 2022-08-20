@@ -1350,7 +1350,7 @@ pub fn Server(comptime Context: type) type {
                             client,
                             client.response_state.file.path,
                             os.linux.O.RDONLY | os.linux.O.NOFOLLOW,
-                            0644,
+                            0o644,
                             onOpenResponseFile,
                         );
                         sqe.flags |= os.linux.IOSQE_IO_LINK;
