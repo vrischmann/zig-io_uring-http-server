@@ -322,7 +322,7 @@ pub const Response = union(enum) {
 };
 
 pub fn RequestHandler(comptime Context: type) type {
-    return fn (Context, mem.Allocator, Peer, Request) anyerror!Response;
+    return *const fn (Context, mem.Allocator, Peer, Request) anyerror!Response;
 }
 
 const ResponseStateFileDescriptor = union(enum) {
