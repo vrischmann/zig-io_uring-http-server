@@ -35,7 +35,7 @@ pub fn do(allocator: mem.Allocator, method: []const u8, url: [:0]const u8, body_
     _ = c.curl_easy_setopt(handle, c.CURLOPT_URL, url.ptr);
 
     // set write function callbacks
-    _ = c.curl_easy_setopt(handle, c.CURLOPT_WRITEFUNCTION, writeToArrayListCallback);
+    _ = c.curl_easy_setopt(handle, c.CURLOPT_WRITEFUNCTION, &writeToArrayListCallback);
     _ = c.curl_easy_setopt(handle, c.CURLOPT_WRITEDATA, &response);
 
     // set read function callbacks

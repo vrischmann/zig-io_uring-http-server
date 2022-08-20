@@ -19,7 +19,7 @@ pub fn Callback(comptime ServerType: type, comptime ClientContext: type) type {
 
         server: ServerType,
         client_context: ?ClientContext = null,
-        call: fn (ServerType, ?ClientContext, io_uring_cqe) anyerror!void,
+        call: *const fn (ServerType, ?ClientContext, io_uring_cqe) anyerror!void,
 
         next: ?*Self = null,
 
