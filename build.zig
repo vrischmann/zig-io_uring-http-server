@@ -29,7 +29,7 @@ pub fn build(b: *std.build.Builder) void {
 
     const exe = b.addExecutable("httpserver", "src/main.zig");
     exe.addPackagePath("args", "third_party/zig-args/args.zig");
-    exe.addIncludeDir("src");
+    exe.addIncludePath("src");
     exe.setTarget(target);
     exe.setBuildMode(mode);
     exe.linkLibrary(picohttp);
@@ -37,7 +37,7 @@ pub fn build(b: *std.build.Builder) void {
     exe.install();
 
     const tests = b.addTest("src/test.zig");
-    tests.addIncludeDir("src");
+    tests.addIncludePath("src");
     tests.setTarget(target);
     tests.setBuildMode(mode);
     tests.linkSystemLibrary("curl");
