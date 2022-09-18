@@ -122,7 +122,6 @@ test "GET 200 OK" {
                     _ = ctx;
                     _ = per_request_allocator;
                     _ = peer;
-                    _ = req;
 
                     try testing.expectEqualStrings("/plaintext", req.path);
                     try testing.expectEqual(httpserver.Method.get, req.method);
@@ -168,7 +167,6 @@ test "POST 200 OK" {
                 _ = ctx;
                 _ = per_request_allocator;
                 _ = peer;
-                _ = req;
 
                 try testing.expectEqualStrings("/foobar", req.path);
                 try testing.expectEqual(httpserver.Method.post, req.method);
@@ -211,7 +209,6 @@ test "GET files" {
                 _ = ctx;
                 _ = per_request_allocator;
                 _ = peer;
-                _ = req;
 
                 try testing.expect(mem.startsWith(u8, req.path, "/static"));
                 try testing.expect(req.headers.get("Host") != null);
