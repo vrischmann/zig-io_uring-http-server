@@ -791,7 +791,7 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn submitClose(self: *Self, client: *ClientState, fd: os.fd_t, comptime cb: anytype) !*io_uring_sqe {
-            logger.debug("ctx#{s:<4} addr={s} submitting close of {d}", .{
+            logger.debug("ctx#{s:<4} addr={} submitting close of {d}", .{
                 self.user_context,
                 client.peer.addr,
                 fd,
@@ -826,7 +826,7 @@ pub fn Server(comptime Context: type) type {
                 },
             }
 
-            logger.debug("ctx#{s:<4} ON ACCEPT accepting connection from {s}", .{ self.user_context, self.listener.peer_addr });
+            logger.debug("ctx#{s:<4} ON ACCEPT accepting connection from {}", .{ self.user_context, self.listener.peer_addr });
 
             const client_fd = @intCast(os.socket_t, cqe.res);
 
@@ -871,7 +871,7 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn onCloseClient(self: *Self, client: *ClientState, cqe: os.linux.io_uring_cqe) !void {
-            logger.debug("ctx#{s:<4} addr={s} ON CLOSE CLIENT fd={}", .{
+            logger.debug("ctx#{s:<4} addr={} ON CLOSE CLIENT fd={}", .{
                 self.user_context,
                 client.peer.addr,
                 client.fd,
@@ -916,15 +916,15 @@ pub fn Server(comptime Context: type) type {
             switch (cqe.err()) {
                 .SUCCESS => {},
                 .PIPE => {
-                    logger.err("ctx#{s:<4} addr={s} broken pipe", .{ self.user_context, client.peer.addr });
+                    logger.err("ctx#{s:<4} addr={} broken pipe", .{ self.user_context, client.peer.addr });
                     return error.BrokenPipe;
                 },
                 .CONNRESET => {
-                    logger.debug("ctx#{s:<4} addr={s} connection reset by peer", .{ self.user_context, client.peer.addr });
+                    logger.debug("ctx#{s:<4} addr={} connection reset by peer", .{ self.user_context, client.peer.addr });
                     return error.ConnectionResetByPeer;
                 },
                 else => |err| {
-                    logger.err("ctx#{s:<4} addr={s} unexpected errno={}", .{ self.user_context, client.peer.addr, err });
+                    logger.err("ctx#{s:<4} addr={} unexpected errno={}", .{ self.user_context, client.peer.addr, err });
                     return error.Unexpected;
                 },
             }
@@ -934,7 +934,7 @@ pub fn Server(comptime Context: type) type {
 
             const read = @intCast(usize, cqe.res);
 
-            logger.debug("ctx#{s:<4} addr={s} ON READ REQUEST read of {d} bytes succeeded", .{ self.user_context, client.peer.addr, read });
+            logger.debug("ctx#{s:<4} addr={} ON READ REQUEST read of {d} bytes succeeded", .{ self.user_context, client.peer.addr, read });
 
             const previous_len = client.buffer.items.len;
             try client.buffer.appendSlice(client.temp_buffer[0..read]);
@@ -945,7 +945,7 @@ pub fn Server(comptime Context: type) type {
             } else {
                 // Not enough data, read more.
 
-                logger.debug("ctx#{s:<4} addr={s} HTTP request incomplete, submitting read", .{ self.user_context, client.peer.addr });
+                logger.debug("ctx#{s:<4} addr={} HTTP request incomplete, submitting read", .{ self.user_context, client.peer.addr });
 
                 _ = try self.submitRead(
                     client,
@@ -960,15 +960,15 @@ pub fn Server(comptime Context: type) type {
             switch (cqe.err()) {
                 .SUCCESS => {},
                 .PIPE => {
-                    logger.err("ctx#{s:<4} addr={s} broken pipe", .{ self.user_context, client.peer.addr });
+                    logger.err("ctx#{s:<4} addr={} broken pipe", .{ self.user_context, client.peer.addr });
                     return error.BrokenPipe;
                 },
                 .CONNRESET => {
-                    logger.err("ctx#{s:<4} addr={s} connection reset by peer", .{ self.user_context, client.peer.addr });
+                    logger.err("ctx#{s:<4} addr={} connection reset by peer", .{ self.user_context, client.peer.addr });
                     return error.ConnectionResetByPeer;
                 },
                 else => |err| {
-                    logger.err("ctx#{s:<4} addr={s} unexpected errno={}", .{ self.user_context, client.peer.addr, err });
+                    logger.err("ctx#{s:<4} addr={} unexpected errno={}", .{ self.user_context, client.peer.addr, err });
                     return error.Unexpected;
                 },
             }
@@ -985,7 +985,7 @@ pub fn Server(comptime Context: type) type {
                 return;
             }
 
-            logger.debug("ctx#{s:<4} addr={s} ON WRITE RESPONSE done", .{
+            logger.debug("ctx#{s:<4} addr={} ON WRITE RESPONSE done", .{
                 self.user_context,
                 client.peer.addr,
             });
@@ -998,7 +998,7 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn onCloseResponseFile(self: *Self, client: *ClientState, cqe: os.linux.io_uring_cqe) !void {
-            logger.debug("ctx#{s:<4} addr={s} ON CLOSE RESPONSE FILE fd={s}", .{
+            logger.debug("ctx#{s:<4} addr={} ON CLOSE RESPONSE FILE fd={s}", .{
                 self.user_context,
                 client.peer.addr,
                 client.response_state.file.fd,
@@ -1019,15 +1019,15 @@ pub fn Server(comptime Context: type) type {
             switch (cqe.err()) {
                 .SUCCESS => {},
                 .PIPE => {
-                    logger.err("ctx#{s:<4} addr={s} broken pipe", .{ self.user_context, client.peer.addr });
+                    logger.err("ctx#{s:<4} addr={} broken pipe", .{ self.user_context, client.peer.addr });
                     return error.BrokenPipe;
                 },
                 .CONNRESET => {
-                    logger.err("ctx#{s:<4} addr={s} connection reset by peer", .{ self.user_context, client.peer.addr });
+                    logger.err("ctx#{s:<4} addr={} connection reset by peer", .{ self.user_context, client.peer.addr });
                     return error.ConnectionResetByPeer;
                 },
                 else => |err| {
-                    logger.err("ctx#{s:<4} addr={s} ON WRITE RESPONSE FILE unexpected errno={}", .{ self.user_context, client.peer.addr, err });
+                    logger.err("ctx#{s:<4} addr={} ON WRITE RESPONSE FILE unexpected errno={}", .{ self.user_context, client.peer.addr, err });
                     return error.Unexpected;
                 },
             }
@@ -1037,7 +1037,7 @@ pub fn Server(comptime Context: type) type {
 
             const written = @intCast(usize, cqe.res);
 
-            logger.debug("ctx#{s:<4} addr={s} ON WRITE RESPONSE FILE write of {d} bytes to {d} succeeded", .{
+            logger.debug("ctx#{s:<4} addr={} ON WRITE RESPONSE FILE write of {d} bytes to {d} succeeded", .{
                 self.user_context,
                 client.peer.addr,
                 written,
@@ -1073,7 +1073,7 @@ pub fn Server(comptime Context: type) type {
                 return;
             }
 
-            logger.debug("ctx#{s:<4} addr={s} ON WRITE RESPONSE FILE done", .{
+            logger.debug("ctx#{s:<4} addr={} ON WRITE RESPONSE FILE done", .{
                 self.user_context,
                 client.peer.addr,
             });
@@ -1099,7 +1099,7 @@ pub fn Server(comptime Context: type) type {
             switch (cqe.err()) {
                 .SUCCESS => {},
                 else => |err| {
-                    logger.err("ctx#{s:<4} addr={s} ON READ RESPONSE FILE unexpected errno={}", .{ self.user_context, client.peer.addr, err });
+                    logger.err("ctx#{s:<4} addr={} ON READ RESPONSE FILE unexpected errno={}", .{ self.user_context, client.peer.addr, err });
                     return error.Unexpected;
                 },
             }
@@ -1111,7 +1111,7 @@ pub fn Server(comptime Context: type) type {
 
             client.response_state.file.offset += read;
 
-            logger.debug("ctx#{s:<4} addr={s} ON READ RESPONSE FILE read of {d} bytes from {s} succeeded, data=\"{s}\"", .{
+            logger.debug("ctx#{s:<4} addr={} ON READ RESPONSE FILE read of {d} bytes from {s} succeeded, data=\"{s}\"", .{
                 self.user_context,
                 client.peer.addr,
                 read,
@@ -1133,12 +1133,12 @@ pub fn Server(comptime Context: type) type {
                     return error.Canceled;
                 },
                 else => |err| {
-                    logger.err("ctx#{s:<4} addr={s} ON STATX RESPONSE FILE unexpected errno={}", .{ self.user_context, client.peer.addr, err });
+                    logger.err("ctx#{s:<4} addr={} ON STATX RESPONSE FILE unexpected errno={}", .{ self.user_context, client.peer.addr, err });
                     return error.Unexpected;
                 },
             }
 
-            logger.debug("ctx#{s:<4} addr={s} ON STATX RESPONSE FILE path=\"{s}\" fd={s}, size={s}", .{
+            logger.debug("ctx#{s:<4} addr={} ON STATX RESPONSE FILE path=\"{s}\" fd={s}, size={s}", .{
                 self.user_context,
                 client.peer.addr,
                 client.response_state.file.path,
@@ -1154,7 +1154,7 @@ pub fn Server(comptime Context: type) type {
 
             // If the file has already been registered, use its registered file descriptor.
             if (self.registered_files.get(client.response_state.file.path)) |entry| {
-                logger.debug("ctx#{s:<4} addr={s} ON STATX RESPONSE FILE file descriptor already registered, path=\"{s}\" registered fd={d}", .{
+                logger.debug("ctx#{s:<4} addr={} ON STATX RESPONSE FILE file descriptor already registered, path=\"{s}\" registered fd={d}", .{
                     self.user_context,
                     client.peer.addr,
                     client.response_state.file.path,
@@ -1176,7 +1176,7 @@ pub fn Server(comptime Context: type) type {
             if (self.registered_fds.acquire(fd)) |registered_fd| {
                 // We were able to acquire a registered file descriptor, make use of it.
 
-                logger.debug("ctx#{s:<4} addr={s} ON STATX RESPONSE FILE registered file descriptor, path=\"{s}\" registered fd={d}", .{
+                logger.debug("ctx#{s:<4} addr={} ON STATX RESPONSE FILE registered file descriptor, path=\"{s}\" registered fd={d}", .{
                     self.user_context,
                     client.peer.addr,
                     client.response_state.file.path,
@@ -1212,15 +1212,15 @@ pub fn Server(comptime Context: type) type {
             switch (cqe.err()) {
                 .SUCCESS => {},
                 .PIPE => {
-                    logger.err("ctx#{s:<4} addr={s} broken pipe", .{ self.user_context, client.peer.addr });
+                    logger.err("ctx#{s:<4} addr={} broken pipe", .{ self.user_context, client.peer.addr });
                     return error.BrokenPipe;
                 },
                 .CONNRESET => {
-                    logger.err("ctx#{s:<4} addr={s} connection reset by peer", .{ self.user_context, client.peer.addr });
+                    logger.err("ctx#{s:<4} addr={} connection reset by peer", .{ self.user_context, client.peer.addr });
                     return error.ConnectionResetByPeer;
                 },
                 else => |err| {
-                    logger.err("ctx#{s:<4} addr={s} unexpected errno={}", .{ self.user_context, client.peer.addr, err });
+                    logger.err("ctx#{s:<4} addr={} unexpected errno={}", .{ self.user_context, client.peer.addr, err });
                     return error.Unexpected;
                 },
             }
@@ -1230,7 +1230,7 @@ pub fn Server(comptime Context: type) type {
 
             const read = @intCast(usize, cqe.res);
 
-            logger.debug("ctx#{s:<4} addr={s} ON READ BODY read of {d} bytes succeeded", .{ self.user_context, client.peer.addr, read });
+            logger.debug("ctx#{s:<4} addr={} ON READ BODY read of {d} bytes succeeded", .{ self.user_context, client.peer.addr, read });
 
             try client.buffer.appendSlice(client.temp_buffer[0..read]);
             client.refreshBody();
@@ -1239,7 +1239,7 @@ pub fn Server(comptime Context: type) type {
             const body = client.request_state.body.?;
 
             if (body.len < content_length) {
-                logger.debug("ctx#{s:<4} addr={s} buffer len={d} bytes, content length={d} bytes", .{
+                logger.debug("ctx#{s:<4} addr={} buffer len={d} bytes, content length={d} bytes", .{
                     self.user_context,
                     client.peer.addr,
                     body.len,
@@ -1263,7 +1263,7 @@ pub fn Server(comptime Context: type) type {
                 .NOENT => {
                     client.temp_buffer_fba.reset();
 
-                    logger.warn("ctx#{s:<4} addr={s} no such file or directory, path=\"{s}\"", .{
+                    logger.warn("ctx#{s:<4} addr={} no such file or directory, path=\"{s}\"", .{
                         self.user_context,
                         client.peer.addr,
                         fmt.fmtSliceEscapeLower(client.response_state.file.path),
@@ -1273,14 +1273,14 @@ pub fn Server(comptime Context: type) type {
                     return;
                 },
                 else => |err| {
-                    logger.err("ctx#{s:<4} addr={s} unexpected errno={}", .{ self.user_context, client.peer.addr, err });
+                    logger.err("ctx#{s:<4} addr={} unexpected errno={}", .{ self.user_context, client.peer.addr, err });
                     return error.Unexpected;
                 },
             }
 
             client.response_state.file.fd = .{ .direct = @intCast(os.fd_t, cqe.res) };
 
-            logger.debug("ctx#{s:<4} addr={s} ON OPEN RESPONSE FILE fd={s}", .{ self.user_context, client.peer.addr, client.response_state.file.fd });
+            logger.debug("ctx#{s:<4} addr={} ON OPEN RESPONSE FILE fd={s}", .{ self.user_context, client.peer.addr, client.response_state.file.fd });
 
             client.temp_buffer_fba.reset();
         }
@@ -1326,7 +1326,7 @@ pub fn Server(comptime Context: type) type {
                     client.response_state.file.path = try client.temp_buffer_fba.allocator().dupeZ(u8, res.path);
 
                     if (self.registered_files.get(client.response_state.file.path)) |registered_file| {
-                        logger.debug("ctx#{s:<4} addr={s} FILE path=\"{s}\" is already registered, fd={d}", .{
+                        logger.debug("ctx#{s:<4} addr={} FILE path=\"{s}\" is already registered, fd={d}", .{
                             self.user_context,
                             client.peer.addr,
                             client.response_state.file.path,
@@ -1369,7 +1369,7 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn submitWriteNotFound(self: *Self, client: *ClientState) !void {
-            logger.debug("ctx#{s:<4} addr={s} returning 404 Not Found", .{
+            logger.debug("ctx#{s:<4} addr={} returning 404 Not Found", .{
                 self.user_context,
                 client.peer.addr,
             });
@@ -1387,13 +1387,13 @@ pub fn Server(comptime Context: type) type {
             // Try to find the content length. If there's one we switch to reading the body.
             const content_length = try client.request_state.parse_result.raw_request.getContentLength();
             if (content_length) |n| {
-                logger.debug("ctx#{s:<4} addr={s} content length: {d}", .{ self.user_context, client.peer.addr, n });
+                logger.debug("ctx#{s:<4} addr={} content length: {d}", .{ self.user_context, client.peer.addr, n });
 
                 client.request_state.content_length = n;
                 client.refreshBody();
 
                 if (client.request_state.body) |body| {
-                    logger.debug("ctx#{s:<4} addr={s} body incomplete, usable={d} bytes, content length: {d} bytes", .{
+                    logger.debug("ctx#{s:<4} addr={} body incomplete, usable={d} bytes, content length: {d} bytes", .{
                         self.user_context,
                         client.peer.addr,
                         body.len,
@@ -1414,7 +1414,7 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn submitRead(self: *Self, client: *ClientState, fd: os.socket_t, offset: u64, comptime cb: anytype) !*io_uring_sqe {
-            logger.debug("ctx#{s:<4} addr={s} submitting read from {d}, offset {d}", .{
+            logger.debug("ctx#{s:<4} addr={} submitting read from {d}, offset {d}", .{
                 self.user_context,
                 client.peer.addr,
                 fd,
@@ -1432,7 +1432,7 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn submitWrite(self: *Self, client: *ClientState, fd: os.fd_t, offset: u64, comptime cb: anytype) !*io_uring_sqe {
-            logger.debug("ctx#{s:<4} addr={s} submitting write of {s} to {d}, offset {d}, data=\"{s}\"", .{
+            logger.debug("ctx#{s:<4} addr={} submitting write of {s} to {d}, offset {d}, data=\"{s}\"", .{
                 self.user_context,
                 client.peer.addr,
                 fmt.fmtIntSizeBin(client.buffer.items.len),
@@ -1452,7 +1452,7 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn submitOpenFile(self: *Self, client: *ClientState, path: [:0]const u8, flags: u32, mode: os.mode_t, comptime cb: anytype) !*io_uring_sqe {
-            logger.debug("ctx#{s:<4} addr={s} submitting open, path=\"{s}\"", .{
+            logger.debug("ctx#{s:<4} addr={} submitting open, path=\"{s}\"", .{
                 self.user_context,
                 client.peer.addr,
                 fmt.fmtSliceEscapeLower(path),
@@ -1470,7 +1470,7 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn submitStatxFile(self: *Self, client: *ClientState, path: [:0]const u8, flags: u32, mask: u32, buf: *os.linux.Statx, comptime cb: anytype) !*io_uring_sqe {
-            logger.debug("ctx#{s:<4} addr={s} submitting statx, path=\"{s}\"", .{
+            logger.debug("ctx#{s:<4} addr={} submitting statx, path=\"{s}\"", .{
                 self.user_context,
                 client.peer.addr,
                 fmt.fmtSliceEscapeLower(path),
