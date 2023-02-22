@@ -49,7 +49,7 @@ pub const RegisteredFileDescriptors = struct {
 
     pub fn acquire(self: *Self, fd: os.fd_t) ?i32 {
         // Find a free slot in the states array
-        for (self.states) |*state, i| {
+        for (self.states, 0..) |*state, i| {
             if (state.* == .free) {
                 // Slot is free, change its state and set the file descriptor.
 

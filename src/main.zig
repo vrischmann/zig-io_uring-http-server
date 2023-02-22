@@ -147,7 +147,7 @@ pub fn main() anyerror!void {
     // Create the servers
 
     var servers = try allocator.alloc(ServerContext, max_server_threads);
-    for (servers) |*item, i| {
+    for (servers, 0..) |*item, i| {
         item.id = i;
         try item.server.init(
             allocator,
