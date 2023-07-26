@@ -69,8 +69,8 @@ pub fn do(allocator: mem.Allocator, method: []const u8, url: [:0]const u8, body_
 }
 
 fn writeToArrayListCallback(data: *anyopaque, size: c_uint, nmemb: c_uint, user_data: *anyopaque) callconv(.C) c_uint {
-    var buffer = @intToPtr(*std.ArrayList(u8), @ptrToInt(user_data));
-    var typed_data = @intToPtr([*]u8, @ptrToInt(data));
+    var buffer = @as(*std.ArrayList(u8), @ptrFromInt(@intFromPtr(user_data)));
+    var typed_data = @as([*]u8, @ptrFromInt(@intFromPtr(data)));
 
     buffer.appendSlice(typed_data[0 .. nmemb * size]) catch return 0;
 

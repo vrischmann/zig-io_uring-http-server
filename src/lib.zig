@@ -209,7 +209,7 @@ const RawRequest = struct {
     }
 
     fn getMinorVersion(self: Self) usize {
-        return @intCast(usize, self.minor_version);
+        return @as(usize, @intCast(self.minor_version));
     }
 
     fn copyHeaders(self: Self, headers: []Header) usize {
@@ -276,7 +276,7 @@ fn parseRequest(previous_buffer_len: usize, buffer: []const u8) !?ParseRequestRe
 
     return ParseRequestResult{
         .raw_request = req,
-        .consumed = @intCast(usize, res),
+        .consumed = @as(usize, @intCast(res)),
     };
 }
 
@@ -423,7 +423,7 @@ const ClientState = struct {
         var writer = self.buffer.writer();
 
         try writer.print("HTTP/1.1 {d} {s}\n", .{
-            @enumToInt(self.response_state.status_code),
+            @intFromEnum(self.response_state.status_code),
             self.response_state.status_code.toString(),
         });
         for (self.response_state.headers) |header| {
@@ -696,14 +696,14 @@ pub fn Server(comptime Context: type) type {
         /// Returnsd the number of events processed.
         fn processCompletions(self: *Self, nr: usize) !usize {
             // TODO(vincent): how should we handle EAGAIN and EINTR ? right now they will shutdown the server.
-            const cqe_count = try self.ring.copy_cqes(self.cqes, @intCast(u32, nr));
+            const cqe_count = try self.ring.copy_cqes(self.cqes, @as(u32, @intCast(nr)));
 
             for (self.cqes[0..cqe_count]) |cqe| {
                 debug.assert(cqe.user_data != 0);
 
                 // We know that a SQE/CQE is _always_ associated with a pointer of type Callback.
 
-                var cb = @intToPtr(*CallbackType, cqe.user_data);
+                var cb = @as(*CallbackType, @ptrFromInt(cqe.user_data));
                 defer self.callbacks.put(cb);
 
                 // Call the provided function with the proper context.
@@ -754,7 +754,7 @@ pub fn Server(comptime Context: type) type {
             var tmp = try self.callbacks.get(onAccept, .{});
 
             return try self.ring.accept(
-                @ptrToInt(tmp),
+                @intFromPtr(tmp),
                 self.listener.server_fd,
                 &self.listener.peer_addr.any,
                 &self.listener.peer_addr_size,
@@ -770,7 +770,7 @@ pub fn Server(comptime Context: type) type {
             var tmp = try self.callbacks.get(onAcceptLinkTimeout, .{});
 
             return self.ring.link_timeout(
-                @ptrToInt(tmp),
+                @intFromPtr(tmp),
                 &self.listener.timeout,
                 0,
             );
@@ -785,7 +785,7 @@ pub fn Server(comptime Context: type) type {
             var tmp = try self.callbacks.get(cb, .{});
 
             return self.ring.close(
-                @ptrToInt(tmp),
+                @intFromPtr(tmp),
                 fd,
             );
         }
@@ -800,7 +800,7 @@ pub fn Server(comptime Context: type) type {
             var tmp = try self.callbacks.get(cb, .{client});
 
             return self.ring.close(
-                @ptrToInt(tmp),
+                @intFromPtr(tmp),
                 fd,
             );
         }
@@ -828,7 +828,7 @@ pub fn Server(comptime Context: type) type {
 
             logger.debug("ctx#{s:<4} ON ACCEPT accepting connection from {}", .{ self.user_context, self.listener.peer_addr });
 
-            const client_fd = @intCast(os.socket_t, cqe.res);
+            const client_fd = @as(os.socket_t, @intCast(cqe.res));
 
             var client = try self.root_allocator.create(ClientState);
             errdefer self.root_allocator.destroy(client);
@@ -932,7 +932,7 @@ pub fn Server(comptime Context: type) type {
                 return error.UnexpectedEOF;
             }
 
-            const read = @intCast(usize, cqe.res);
+            const read = @as(usize, @intCast(cqe.res));
 
             logger.debug("ctx#{s:<4} addr={} ON READ REQUEST read of {d} bytes succeeded", .{ self.user_context, client.peer.addr, read });
 
@@ -973,7 +973,7 @@ pub fn Server(comptime Context: type) type {
                 },
             }
 
-            const written = @intCast(usize, cqe.res);
+            const written = @as(usize, @intCast(cqe.res));
 
             if (written < client.buffer.items.len) {
                 // Short write, write the remaining data
@@ -1035,7 +1035,7 @@ pub fn Server(comptime Context: type) type {
                 return error.UnexpectedEOF;
             }
 
-            const written = @intCast(usize, cqe.res);
+            const written = @as(usize, @intCast(cqe.res));
 
             logger.debug("ctx#{s:<4} addr={} ON WRITE RESPONSE FILE write of {d} bytes to {d} succeeded", .{
                 self.user_context,
@@ -1107,7 +1107,7 @@ pub fn Server(comptime Context: type) type {
                 return error.UnexpectedEOF;
             }
 
-            const read = @intCast(usize, cqe.res);
+            const read = @as(usize, @intCast(cqe.res));
 
             client.response_state.file.offset += read;
 
@@ -1228,7 +1228,7 @@ pub fn Server(comptime Context: type) type {
                 return error.UnexpectedEOF;
             }
 
-            const read = @intCast(usize, cqe.res);
+            const read = @as(usize, @intCast(cqe.res));
 
             logger.debug("ctx#{s:<4} addr={} ON READ BODY read of {d} bytes succeeded", .{ self.user_context, client.peer.addr, read });
 
@@ -1278,7 +1278,7 @@ pub fn Server(comptime Context: type) type {
                 },
             }
 
-            client.response_state.file.fd = .{ .direct = @intCast(os.fd_t, cqe.res) };
+            client.response_state.file.fd = .{ .direct = @as(os.fd_t, @intCast(cqe.res)) };
 
             logger.debug("ctx#{s:<4} addr={} ON OPEN RESPONSE FILE fd={s}", .{ self.user_context, client.peer.addr, client.response_state.file.fd });
 
@@ -1424,7 +1424,7 @@ pub fn Server(comptime Context: type) type {
             var tmp = try self.callbacks.get(cb, .{client});
 
             return self.ring.read(
-                @ptrToInt(tmp),
+                @intFromPtr(tmp),
                 fd,
                 .{ .buffer = &client.temp_buffer },
                 offset,
@@ -1444,7 +1444,7 @@ pub fn Server(comptime Context: type) type {
             var tmp = try self.callbacks.get(cb, .{client});
 
             return self.ring.write(
-                @ptrToInt(tmp),
+                @intFromPtr(tmp),
                 fd,
                 client.buffer.items,
                 offset,
@@ -1461,7 +1461,7 @@ pub fn Server(comptime Context: type) type {
             var tmp = try self.callbacks.get(cb, .{client});
 
             return try self.ring.openat(
-                @ptrToInt(tmp),
+                @intFromPtr(tmp),
                 os.linux.AT.FDCWD,
                 path,
                 flags,
@@ -1479,7 +1479,7 @@ pub fn Server(comptime Context: type) type {
             var tmp = try self.callbacks.get(cb, .{client});
 
             return self.ring.statx(
-                @ptrToInt(tmp),
+                @intFromPtr(tmp),
                 os.linux.AT.FDCWD,
                 path,
                 flags,

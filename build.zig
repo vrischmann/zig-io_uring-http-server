@@ -41,7 +41,7 @@ pub fn build(b: *std.build.Builder) void {
     exe.addIncludePath("src");
     exe.linkLibrary(picohttp);
     exe.addOptions("build_options", build_options);
-    exe.install();
+    b.installArtifact(exe);
 
     const tests = b.addTest(.{
         .name = "test",

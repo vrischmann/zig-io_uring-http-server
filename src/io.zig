@@ -56,7 +56,7 @@ pub const RegisteredFileDescriptors = struct {
                 state.* = .used;
                 self.fds[i] = fd;
 
-                return @intCast(i32, i);
+                return @as(i32, @intCast(i));
             }
         } else {
             return null;
@@ -64,7 +64,7 @@ pub const RegisteredFileDescriptors = struct {
     }
 
     pub fn release(self: *Self, index: i32) void {
-        const idx = @intCast(usize, index);
+        const idx = @as(usize, @intCast(index));
 
         debug.assert(self.states[idx] == .used);
         debug.assert(self.fds[idx] != -1);
