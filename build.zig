@@ -7,6 +7,12 @@ pub fn build(b: *std.build.Builder) void {
     const debug_callback_internals = b.option(bool, "debug-callback-internals", "Enable callback debugging") orelse false;
     const debug_accepts = b.option(bool, "debug-accepts", "Enable debugging for accepts") orelse false;
 
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "debug_callback_internals", debug_callback_internals);
+    build_options.addOption(bool, "debug_accepts", debug_accepts);
+
+    //
+
     const picohttp_flags: []const []const u8 = switch (optimize) {
         .Debug => &.{},
         .ReleaseFast, .ReleaseSafe => &.{
@@ -28,9 +34,9 @@ pub fn build(b: *std.build.Builder) void {
     });
     picohttp.linkLibC();
 
-    const build_options = b.addOptions();
-    build_options.addOption(bool, "debug_callback_internals", debug_callback_internals);
-    build_options.addOption(bool, "debug_accepts", debug_accepts);
+    //
+
+    const args = b.dependency("args", .{});
 
     const exe = b.addExecutable(.{
         .name = "httpserver",
@@ -38,9 +44,7 @@ pub fn build(b: *std.build.Builder) void {
         .optimize = optimize,
         .root_source_file = .{ .path = "src/main.zig" },
     });
-    exe.addAnonymousModule("args", .{
-        .source_file = .{ .path = "third_party/zig-args/args.zig" },
-    });
+    exe.addModule("args", args.module("args"));
     exe.addIncludePath(.{ .path = "src" });
     exe.linkLibrary(picohttp);
     exe.addOptions("build_options", build_options);
