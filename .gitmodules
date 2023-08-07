@@ -1,3 +1,0 @@
-[submodule "third_party/zig-args"]
-	path = third_party/zig-args
-	url = git@github.com:vrischmann/zig-args.git

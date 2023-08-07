@@ -104,7 +104,7 @@ const ServerContext = struct {
 
 pub fn main() anyerror!void {
     var gpa = heap.GeneralPurposeAllocator(.{}){};
-    defer if (gpa.deinit()) {
+    defer if (gpa.deinit() == .leak) {
         debug.panic("leaks detected", .{});
     };
     var allocator = gpa.allocator();
