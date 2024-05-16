@@ -1,10 +1,11 @@
 .{
-	.name = "zig-io_uring-http-server",
-	.version = "0.1.0",
-	.dependencies = .{
-		.args = .{
-			.url = "https://github.com/MasterQ32/zig-args/archive/bb2eced8ddf28114b3a1ff761c2d80b90b1a61e2.tar.gz",
-			.hash = "12208556082c280af264ca2a174fd04fc7a35f865bfe59e2c61f4a977bf7a65063e4",
-		},
-	},
+    .name = "zig-io_uring-http-server",
+    .version = "0.1.0",
+    .paths = .{"."},
+    .dependencies = .{
+        .args = .{
+            .url = "https://github.com/MasterQ32/zig-args/archive/adb65692a3e3e1d7ea00e4f865ef1b1718326573.tar.gz",
+            .hash = "1220e23828fcdbf6fdcd53b7cd422e041570bc52d65d4fb97ac76cd6fad6a88dccc1",
+        },
+    },
 }
