@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub fn build(b: *std.build.Builder) void {
+pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -29,7 +29,7 @@ pub fn build(b: *std.build.Builder) void {
         .optimize = optimize,
     });
     picohttp.addCSourceFile(.{
-        .file = .{ .path = "src/picohttpparser.c" },
+        .file = b.path("src/picohttpparser.c"),
         .flags = picohttp_flags,
     });
     picohttp.linkLibC();
@@ -42,24 +42,24 @@ pub fn build(b: *std.build.Builder) void {
         .name = "httpserver",
         .target = target,
         .optimize = optimize,
-        .root_source_file = .{ .path = "src/main.zig" },
+        .root_source_file = b.path("src/main.zig"),
     });
-    exe.addModule("args", args.module("args"));
-    exe.addIncludePath(.{ .path = "src" });
+    exe.root_module.addImport("args", args.module("args"));
+    exe.addIncludePath(b.path("src"));
     exe.linkLibrary(picohttp);
-    exe.addOptions("build_options", build_options);
+    exe.root_module.addImport("build_options", build_options.createModule());
     b.installArtifact(exe);
 
     const tests = b.addTest(.{
         .name = "test",
-        .root_source_file = .{ .path = "src/test.zig" },
+        .root_source_file = b.path("src/test.zig"),
         .target = target,
         .optimize = optimize,
     });
-    tests.addIncludePath(.{ .path = "src" });
+    tests.addIncludePath(b.path("src"));
     tests.linkSystemLibrary("curl");
     tests.linkLibrary(picohttp);
-    tests.addOptions("build_options", build_options);
+    tests.root_module.addImport("build_options", build_options.createModule());
 
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&tests.step);
