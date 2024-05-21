@@ -9,11 +9,12 @@ const mem = std.mem;
 const net = std.net;
 const os = std.os;
 const time = std.time;
+const posix = std.posix;
 
-const Atomic = std.atomic.Atomic;
+const Atomic = std.atomic.Value;
 const assert = std.debug.assert;
 
-const IO_Uring = std.os.linux.IO_Uring;
+const IoUring = std.os.linux.IoUring;
 const io_uring_cqe = std.os.linux.io_uring_cqe;
 const io_uring_sqe = std.os.linux.io_uring_sqe;
 
@@ -326,8 +327,8 @@ pub fn RequestHandler(comptime Context: type) type {
 }
 
 const ResponseStateFileDescriptor = union(enum) {
-    direct: os.fd_t,
-    registered: os.fd_t,
+    direct: posix.fd_t,
+    registered: posix.fd_t,
 
     pub fn format(self: ResponseStateFileDescriptor, comptime fmt_string: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = options;
@@ -371,7 +372,7 @@ const ClientState = struct {
 
     /// peer information associated with this client
     peer: Peer,
-    fd: os.socket_t,
+    fd: posix.socket_t,
 
     // Buffer and allocator used for small allocations (nul-terminated path, integer to int conversions etc).
     temp_buffer: [128]u8 = undefined,
@@ -388,7 +389,7 @@ const ClientState = struct {
     request_state: RequestState = .{},
     response_state: ResponseState = .{},
 
-    pub fn init(self: *ClientState, allocator: mem.Allocator, peer_addr: net.Address, client_fd: os.socket_t, max_buffer_size: usize) !void {
+    pub fn init(self: *ClientState, allocator: mem.Allocator, peer_addr: net.Address, client_fd: posix.socket_t, max_buffer_size: usize) !void {
         self.* = .{
             .gpa = allocator,
             .peer = .{
@@ -462,7 +463,7 @@ pub fn Server(comptime Context: type) type {
         root_allocator: mem.Allocator,
 
         /// uring dedicated to this server object.
-        ring: IO_Uring,
+        ring: IoUring,
 
         /// options controlling the behaviour of the server.
         options: ServerOptions,
@@ -483,7 +484,7 @@ pub fn Server(comptime Context: type) type {
         listener: struct {
             /// server file descriptor used for accept(2) operation.
             /// Must have had bind(2) and listen(2) called on it before being passed to `init()`.
-            server_fd: os.socket_t,
+            server_fd: posix.socket_t,
 
             /// indicates if an accept operation is pending.
             accept_waiting: bool = false,
@@ -505,7 +506,7 @@ pub fn Server(comptime Context: type) type {
             peer_addr: net.Address = net.Address{
                 .any = undefined,
             },
-            peer_addr_size: u32 = @sizeOf(os.sockaddr),
+            peer_addr_size: u32 = @sizeOf(posix.sockaddr),
         },
 
         /// CQEs storage
@@ -541,7 +542,7 @@ pub fn Server(comptime Context: type) type {
             /// owned by the caller and indicates if the server should shutdown properly.
             running: *Atomic(bool),
             /// must be a socket properly initialized with listen(2) and bind(2) which will be used for accept(2) operations.
-            server_fd: os.socket_t,
+            server_fd: posix.socket_t,
             /// user provided context that will be passed to the request handlers.
             user_context: Context,
             /// user provied request handler.
@@ -551,7 +552,7 @@ pub fn Server(comptime Context: type) type {
 
             self.* = .{
                 .root_allocator = allocator,
-                .ring = try std.os.linux.IO_Uring.init(options.max_ring_entries, 0),
+                .ring = try std.os.linux.IoUring.init(options.max_ring_entries, 0),
                 .options = options,
                 .running = running,
                 .listener = .{
@@ -597,7 +598,7 @@ pub fn Server(comptime Context: type) type {
             // TODO(vincent): we don't properly shutdown the peer sockets; we should do that.
             // This can be done using standard close(2) calls I think.
 
-            while (self.running.load(.SeqCst)) {
+            while (self.running.load(.seq_cst)) {
                 // first step: (maybe) submit and accept with a link_timeout linked to it.
                 //
                 // Nothing is submitted if:
@@ -629,7 +630,7 @@ pub fn Server(comptime Context: type) type {
         }
 
         fn maybeAccept(self: *Self, timeout: u63) !void {
-            if (!self.running.load(.SeqCst)) {
+            if (!self.running.load(.seq_cst)) {
                 // we must stop: stop accepting connections.
                 return;
             }
@@ -751,7 +752,7 @@ pub fn Server(comptime Context: type) type {
                 });
             }
 
-            var tmp = try self.callbacks.get(onAccept, .{});
+            const tmp = try self.callbacks.get(onAccept, .{});
 
             return try self.ring.accept(
                 @intFromPtr(tmp),
@@ -767,7 +768,7 @@ pub fn Server(comptime Context: type) type {
                 logger.debug("ctx#{s:<4} submitting link timeout", .{self.user_context});
             }
 
-            var tmp = try self.callbacks.get(onAcceptLinkTimeout, .{});
+            const tmp = try self.callbacks.get(onAcceptLinkTimeout, .{});
 
             return self.ring.link_timeout(
                 @intFromPtr(tmp),
@@ -776,13 +777,13 @@ pub fn Server(comptime Context: type) type {
             );
         }
 
-        fn submitStandaloneClose(self: *Self, fd: os.fd_t, comptime cb: anytype) !*io_uring_sqe {
+        fn submitStandaloneClose(self: *Self, fd: posix.fd_t, comptime cb: anytype) !*io_uring_sqe {
             logger.debug("ctx#{s:<4} submitting close of {d}", .{
                 self.user_context,
                 fd,
             });
 
-            var tmp = try self.callbacks.get(cb, .{});
+            const tmp = try self.callbacks.get(cb, .{});
 
             return self.ring.close(
                 @intFromPtr(tmp),
@@ -790,14 +791,14 @@ pub fn Server(comptime Context: type) type {
             );
         }
 
-        fn submitClose(self: *Self, client: *ClientState, fd: os.fd_t, comptime cb: anytype) !*io_uring_sqe {
+        fn submitClose(self: *Self, client: *ClientState, fd: posix.fd_t, comptime cb: anytype) !*io_uring_sqe {
             logger.debug("ctx#{s:<4} addr={} submitting close of {d}", .{
                 self.user_context,
                 client.peer.addr,
                 fd,
             });
 
-            var tmp = try self.callbacks.get(cb, .{client});
+            const tmp = try self.callbacks.get(cb, .{client});
 
             return self.ring.close(
                 @intFromPtr(tmp),
@@ -828,7 +829,7 @@ pub fn Server(comptime Context: type) type {
 
             logger.debug("ctx#{s:<4} ON ACCEPT accepting connection from {}", .{ self.user_context, self.listener.peer_addr });
 
-            const client_fd = @as(os.socket_t, @intCast(cqe.res));
+            const client_fd = @as(posix.socket_t, @intCast(cqe.res));
 
             var client = try self.root_allocator.create(ClientState);
             errdefer self.root_allocator.destroy(client);
@@ -1187,7 +1188,7 @@ pub fn Server(comptime Context: type) type {
 
                 try self.registered_fds.update(&self.ring);
 
-                var entry = try self.registered_files.getOrPut(client.response_state.file.path);
+                const entry = try self.registered_files.getOrPut(client.response_state.file.path);
                 if (!entry.found_existing) {
                     entry.key_ptr.* = try self.root_allocator.dupeZ(u8, client.response_state.file.path);
                     entry.value_ptr.* = RegisteredFile{
@@ -1278,7 +1279,7 @@ pub fn Server(comptime Context: type) type {
                 },
             }
 
-            client.response_state.file.fd = .{ .direct = @as(os.fd_t, @intCast(cqe.res)) };
+            client.response_state.file.fd = .{ .direct = @as(posix.fd_t, @intCast(cqe.res)) };
 
             logger.debug("ctx#{s:<4} addr={} ON OPEN RESPONSE FILE fd={s}", .{ self.user_context, client.peer.addr, client.response_state.file.fd });
 
@@ -1349,7 +1350,7 @@ pub fn Server(comptime Context: type) type {
                         var sqe = try self.submitOpenFile(
                             client,
                             client.response_state.file.path,
-                            os.linux.O.RDONLY | os.linux.O.NOFOLLOW,
+                            .{ .ACCMODE = .RDONLY, .NOFOLLOW = true },
                             0o644,
                             onOpenResponseFile,
                         );
@@ -1413,7 +1414,7 @@ pub fn Server(comptime Context: type) type {
             try self.callHandler(client);
         }
 
-        fn submitRead(self: *Self, client: *ClientState, fd: os.socket_t, offset: u64, comptime cb: anytype) !*io_uring_sqe {
+        fn submitRead(self: *Self, client: *ClientState, fd: posix.socket_t, offset: u64, comptime cb: anytype) !*io_uring_sqe {
             logger.debug("ctx#{s:<4} addr={} submitting read from {d}, offset {d}", .{
                 self.user_context,
                 client.peer.addr,
@@ -1421,7 +1422,7 @@ pub fn Server(comptime Context: type) type {
                 offset,
             });
 
-            var tmp = try self.callbacks.get(cb, .{client});
+            const tmp = try self.callbacks.get(cb, .{client});
 
             return self.ring.read(
                 @intFromPtr(tmp),
@@ -1431,7 +1432,7 @@ pub fn Server(comptime Context: type) type {
             );
         }
 
-        fn submitWrite(self: *Self, client: *ClientState, fd: os.fd_t, offset: u64, comptime cb: anytype) !*io_uring_sqe {
+        fn submitWrite(self: *Self, client: *ClientState, fd: posix.fd_t, offset: u64, comptime cb: anytype) !*io_uring_sqe {
             logger.debug("ctx#{s:<4} addr={} submitting write of {s} to {d}, offset {d}, data=\"{s}\"", .{
                 self.user_context,
                 client.peer.addr,
@@ -1441,7 +1442,7 @@ pub fn Server(comptime Context: type) type {
                 fmt.fmtSliceEscapeLower(client.buffer.items),
             });
 
-            var tmp = try self.callbacks.get(cb, .{client});
+            const tmp = try self.callbacks.get(cb, .{client});
 
             return self.ring.write(
                 @intFromPtr(tmp),
@@ -1451,14 +1452,14 @@ pub fn Server(comptime Context: type) type {
             );
         }
 
-        fn submitOpenFile(self: *Self, client: *ClientState, path: [:0]const u8, flags: u32, mode: os.mode_t, comptime cb: anytype) !*io_uring_sqe {
+        fn submitOpenFile(self: *Self, client: *ClientState, path: [:0]const u8, flags: os.linux.O, mode: posix.mode_t, comptime cb: anytype) !*io_uring_sqe {
             logger.debug("ctx#{s:<4} addr={} submitting open, path=\"{s}\"", .{
                 self.user_context,
                 client.peer.addr,
                 fmt.fmtSliceEscapeLower(path),
             });
 
-            var tmp = try self.callbacks.get(cb, .{client});
+            const tmp = try self.callbacks.get(cb, .{client});
 
             return try self.ring.openat(
                 @intFromPtr(tmp),
@@ -1476,7 +1477,7 @@ pub fn Server(comptime Context: type) type {
                 fmt.fmtSliceEscapeLower(path),
             });
 
-            var tmp = try self.callbacks.get(cb, .{client});
+            const tmp = try self.callbacks.get(cb, .{client});
 
             return self.ring.statx(
                 @intFromPtr(tmp),
