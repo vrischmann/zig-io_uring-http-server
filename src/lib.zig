@@ -1190,7 +1190,7 @@ pub fn Server(comptime Context: type) type {
 
                 const entry = try self.registered_files.getOrPut(client.response_state.file.path);
                 if (!entry.found_existing) {
-                    entry.key_ptr.* = try self.root_allocator.dupeZ(u8, client.response_state.file.path);
+                    entry.key_ptr.* = try self.root_allocator.dupe(u8, client.response_state.file.path);
                     entry.value_ptr.* = RegisteredFile{
                         .fd = registered_fd,
                         .size = client.response_state.file.statx_buf.size,
