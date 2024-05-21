@@ -1,38 +1,14 @@
 name: CI
-
-on:
-  push: {}
-  pull_request: {}
-  schedule:
-    - cron: "0 13 * * *"
-  workflow_dispatch:
-
+on: [push, pull_request]
 jobs:
-  lint:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - uses: goto-bus-stop/setup-zig@v1
+      - uses: actions/checkout@v4
+      - uses: goto-bus-stop/setup-zig@v2
         with:
-          version: master
-      - run: zig fmt --check *.zig src/*.zig
-
-  build:
-    strategy:
-      matrix:
-        os: [ubuntu-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v2
-        with:
-          submodules: true
-      - uses: goto-bus-stop/setup-zig@v1
-        with:
-          version: master
+          version: 0.12.0
+      - run: zig fmt --check .
       - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
-
-      - name: Build
-        run: zig build
-
-      - name: Test
-        run: zig build test
+      - run: zig build
+      - run: zig build test
