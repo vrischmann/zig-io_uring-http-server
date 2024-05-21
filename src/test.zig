@@ -6,8 +6,9 @@ const net = std.net;
 const os = std.os;
 const testing = std.testing;
 const time = std.time;
+const posix = std.posix;
 
-const Atomic = std.atomic.Atomic;
+const Atomic = std.atomic.Value;
 const assert = std.debug.assert;
 
 const httpserver = @import("lib.zig");
@@ -21,7 +22,7 @@ const TestHarness = struct {
 
     root_allocator: mem.Allocator,
     arena: heap.ArenaAllocator,
-    socket: os.socket_t,
+    socket: posix.socket_t,
     running: Atomic(bool) = Atomic(bool).init(true),
     server: httpserver.Server(*Self),
     thread: std.Thread,
@@ -35,20 +36,20 @@ const TestHarness = struct {
 
     fn create(allocator: mem.Allocator, comptime handler: httpserver.RequestHandler(*Self)) !*TestHarness {
         const socket = blk: {
-            const sockfd = try os.socket(os.AF.INET6, os.SOCK.STREAM, 0);
-            errdefer os.close(sockfd);
+            const sockfd = try posix.socket(posix.AF.INET6, posix.SOCK.STREAM, 0);
+            errdefer posix.close(sockfd);
 
-            os.setsockopt(
+            posix.setsockopt(
                 sockfd,
-                os.SOL.SOCKET,
-                os.SO.REUSEADDR,
+                posix.SOL.SOCKET,
+                posix.SO.REUSEADDR,
                 &mem.toBytes(@as(c_int, 1)),
             ) catch {};
 
             const addr = try net.Address.parseIp6("::0", port);
 
-            try os.bind(sockfd, &addr.any, @sizeOf(os.sockaddr.in6));
-            try os.listen(sockfd, std.math.maxInt(u31));
+            try posix.bind(sockfd, &addr.any, @sizeOf(posix.sockaddr.in6));
+            try posix.listen(sockfd, std.math.maxInt(u31));
 
             break :blk sockfd;
         };
@@ -87,12 +88,12 @@ const TestHarness = struct {
 
     fn deinit(self: *TestHarness) void {
         // Wait for the server to finish
-        self.running.store(false, .SeqCst);
+        self.running.store(false, .seq_cst);
         self.thread.join();
 
         // Clean up the server
         self.server.deinit();
-        os.close(self.socket);
+        posix.close(self.socket);
 
         // Clean up our own data
         self.arena.deinit();

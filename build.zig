@@ -51,7 +51,6 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     const tests = b.addTest(.{
-        .name = "test",
         .root_source_file = b.path("src/test.zig"),
         .target = target,
         .optimize = optimize,
@@ -60,7 +59,8 @@ pub fn build(b: *std.Build) void {
     tests.linkSystemLibrary("curl");
     tests.linkLibrary(picohttp);
     tests.root_module.addImport("build_options", build_options.createModule());
+    const run_tests = b.addRunArtifact(tests);
 
     const test_step = b.step("test", "Run library tests");
-    test_step.dependOn(&tests.step);
+    test_step.dependOn(&run_tests.step);
 }
