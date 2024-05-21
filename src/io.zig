@@ -3,8 +3,9 @@ const debug = std.debug;
 const mem = std.mem;
 const net = std.net;
 const os = std.os;
+const posix = std.posix;
 
-const IO_Uring = std.os.linux.IO_Uring;
+const IoUring = std.os.linux.IoUring;
 
 const logger = std.log.scoped(.io_helpers);
 
@@ -12,7 +13,7 @@ const logger = std.log.scoped(.io_helpers);
 const max_connections = 128;
 
 pub const RegisteredFile = struct {
-    fd: os.fd_t,
+    fd: posix.fd_t,
     size: u64,
 };
 
@@ -28,10 +29,10 @@ pub const RegisteredFileDescriptors = struct {
         free,
     };
 
-    fds: [max_connections]os.fd_t = [_]os.fd_t{-1} ** max_connections,
+    fds: [max_connections]posix.fd_t = [_]posix.fd_t{-1} ** max_connections,
     states: [max_connections]State = [_]State{.free} ** max_connections,
 
-    pub fn register(self: *Self, ring: *IO_Uring) !void {
+    pub fn register(self: *Self, ring: *IoUring) !void {
         logger.debug("REGISTERED FILE DESCRIPTORS, fds={d}", .{
             self.fds,
         });
@@ -39,7 +40,7 @@ pub const RegisteredFileDescriptors = struct {
         try ring.register_files(self.fds[0..]);
     }
 
-    pub fn update(self: *Self, ring: *IO_Uring) !void {
+    pub fn update(self: *Self, ring: *IoUring) !void {
         logger.debug("UPDATE FILE DESCRIPTORS, fds={d}", .{
             self.fds,
         });
@@ -47,7 +48,7 @@ pub const RegisteredFileDescriptors = struct {
         try ring.register_files_update(0, self.fds[0..]);
     }
 
-    pub fn acquire(self: *Self, fd: os.fd_t) ?i32 {
+    pub fn acquire(self: *Self, fd: posix.fd_t) ?i32 {
         // Find a free slot in the states array
         for (&self.states, 0..) |*state, i| {
             if (state.* == .free) {
@@ -78,30 +79,30 @@ pub const RegisteredFileDescriptors = struct {
 ///
 /// This enables SO_REUSEADDR so that we can have multiple listeners
 /// on the same port, that way the kernel load balances connections to our workers.
-pub fn createSocket(port: u16) !os.socket_t {
-    const sockfd = try os.socket(os.AF.INET6, os.SOCK.STREAM, 0);
-    errdefer os.close(sockfd);
+pub fn createSocket(port: u16) !posix.socket_t {
+    const sockfd = try posix.socket(posix.AF.INET6, posix.SOCK.STREAM, 0);
+    errdefer posix.close(sockfd);
 
     // Enable reuseaddr if possible
-    os.setsockopt(
+    posix.setsockopt(
         sockfd,
-        os.SOL.SOCKET,
-        os.SO.REUSEPORT,
+        posix.SOL.SOCKET,
+        posix.SO.REUSEPORT,
         &mem.toBytes(@as(c_int, 1)),
     ) catch {};
 
     // Disable IPv6 only
-    try os.setsockopt(
+    try posix.setsockopt(
         sockfd,
-        os.IPPROTO.IPV6,
+        posix.IPPROTO.IPV6,
         os.linux.IPV6.V6ONLY,
         &mem.toBytes(@as(c_int, 0)),
     );
 
     const addr = try net.Address.parseIp6("::0", port);
 
-    try os.bind(sockfd, &addr.any, @sizeOf(os.sockaddr.in6));
-    try os.listen(sockfd, std.math.maxInt(u31));
+    try posix.bind(sockfd, &addr.any, @sizeOf(posix.sockaddr.in6));
+    try posix.listen(sockfd, std.math.maxInt(u31));
 
     return sockfd;
 }

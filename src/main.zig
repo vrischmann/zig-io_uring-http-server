@@ -7,8 +7,9 @@ const mem = std.mem;
 const net = std.net;
 const os = std.os;
 const time = std.time;
+const posix = std.posix;
 
-const Atomic = std.atomic.Atomic;
+const Atomic = std.atomic.Value;
 const assert = std.debug.assert;
 
 const IO_Uring = std.os.linux.IO_Uring;
@@ -26,33 +27,33 @@ var global_running: Atomic(bool) = Atomic(bool).init(true);
 fn addSignalHandlers() !void {
     // Ignore broken pipes
     {
-        var act = os.Sigaction{
+        var act = posix.Sigaction{
             .handler = .{
-                .handler = os.SIG.IGN,
+                .handler = posix.SIG.IGN,
             },
-            .mask = os.empty_sigset,
+            .mask = posix.empty_sigset,
             .flags = 0,
         };
-        try os.sigaction(os.SIG.PIPE, &act, null);
+        try posix.sigaction(posix.SIG.PIPE, &act, null);
     }
 
     // Catch SIGINT/SIGTERM for proper shutdown
     {
-        var act = os.Sigaction{
+        var act = posix.Sigaction{
             .handler = .{
                 .handler = struct {
                     fn wrapper(sig: c_int) callconv(.C) void {
                         logger.info("caught signal {d}", .{sig});
 
-                        global_running.store(false, .SeqCst);
+                        global_running.store(false, .seq_cst);
                     }
                 }.wrapper,
             },
-            .mask = os.empty_sigset,
+            .mask = posix.empty_sigset,
             .flags = 0,
         };
-        try os.sigaction(os.SIG.TERM, &act, null);
-        try os.sigaction(os.SIG.INT, &act, null);
+        try posix.sigaction(posix.SIG.TERM, &act, null);
+        try posix.sigaction(posix.SIG.INT, &act, null);
     }
 }
 
@@ -146,7 +147,7 @@ pub fn main() anyerror!void {
 
     // Create the servers
 
-    var servers = try allocator.alloc(ServerContext, max_server_threads);
+    const servers = try allocator.alloc(ServerContext, max_server_threads);
     for (servers, 0..) |*item, i| {
         item.id = i;
         try item.server.init(
