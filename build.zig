@@ -36,7 +36,7 @@ pub fn build(b: *std.Build) void {
 
     //
 
-    const args = b.dependency("args", .{});
+    const args = b.dependency("zig-args", .{});
 
     const exe = b.addExecutable(.{
         .name = "httpserver",
