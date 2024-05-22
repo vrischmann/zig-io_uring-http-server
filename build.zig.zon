@@ -3,9 +3,9 @@
     .version = "0.1.0",
     .paths = .{"."},
     .dependencies = .{
-        .args = .{
-            .url = "https://github.com/MasterQ32/zig-args/archive/adb65692a3e3e1d7ea00e4f865ef1b1718326573.tar.gz",
-            .hash = "1220e23828fcdbf6fdcd53b7cd422e041570bc52d65d4fb97ac76cd6fad6a88dccc1",
+        .@"zig-args" = .{
+            .url = "https://github.com/ikskuh/zig-args/archive/refs/heads/master.zip",
+            .hash = "1220fe6ae56b668cc4a033282b5f227bfbb46a67ede6d84e9f9493fea9de339b5f37",
         },
     },
 }
