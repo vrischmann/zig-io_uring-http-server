@@ -34,7 +34,7 @@ fn addSignalHandlers() !void {
             .mask = posix.empty_sigset,
             .flags = 0,
         };
-        try posix.sigaction(posix.SIG.PIPE, &act, null);
+        posix.sigaction(posix.SIG.PIPE, &act, null);
     }
 
     // Catch SIGINT/SIGTERM for proper shutdown
@@ -52,8 +52,8 @@ fn addSignalHandlers() !void {
             .mask = posix.empty_sigset,
             .flags = 0,
         };
-        try posix.sigaction(posix.SIG.TERM, &act, null);
-        try posix.sigaction(posix.SIG.INT, &act, null);
+        posix.sigaction(posix.SIG.TERM, &act, null);
+        posix.sigaction(posix.SIG.INT, &act, null);
     }
 }
 

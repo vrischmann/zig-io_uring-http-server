@@ -497,8 +497,8 @@ pub fn Server(comptime Context: type) type {
             ///
             /// This is useful to run the main loop for a bounded duration.
             timeout: os.linux.kernel_timespec = .{
-                .tv_sec = 0,
-                .tv_nsec = 0,
+                .sec = 0,
+                .nsec = 0,
             },
 
             // Next peer we're accepting.
@@ -643,8 +643,8 @@ pub fn Server(comptime Context: type) type {
             var sqe = try self.submitAccept();
             sqe.flags |= os.linux.IOSQE_IO_LINK;
 
-            self.listener.timeout.tv_sec = 0;
-            self.listener.timeout.tv_nsec = timeout;
+            self.listener.timeout.sec = 0;
+            self.listener.timeout.nsec = timeout;
 
             _ = try self.submitAcceptLinkTimeout();
 
