@@ -148,6 +148,8 @@ pub fn main() anyerror!void {
     // Create the servers
 
     const servers = try allocator.alloc(ServerContext, max_server_threads);
+    errdefer allocator.free(servers);
+
     for (servers, 0..) |*item, i| {
         item.id = i;
         try item.server.init(
