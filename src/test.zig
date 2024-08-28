@@ -55,6 +55,8 @@ const TestHarness = struct {
         };
 
         var res = try allocator.create(TestHarness);
+        errdefer allocator.destroy(res);
+
         res.* = .{
             .root_allocator = allocator,
             .arena = heap.ArenaAllocator.init(allocator),
