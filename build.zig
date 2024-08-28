@@ -11,6 +11,11 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(bool, "debug_callback_internals", debug_callback_internals);
     build_options.addOption(bool, "debug_accepts", debug_accepts);
 
+    if (target.result.os.tag != .linux) {
+        b.default_step.dependOn(&b.addFail("io_uring is only available on linux").step);
+        return;
+    }
+
     //
 
     const picohttp_flags: []const []const u8 = switch (optimize) {
