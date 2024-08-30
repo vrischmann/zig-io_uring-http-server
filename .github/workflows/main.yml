@@ -4,11 +4,6 @@ on:
   create:
   push:
     branches: master
-    paths:
-      - '**.zig'
-      - '*.zig.zon'
-      - dagger
-      - dagger.json
   pull_request:
   schedule:
     - cron: "0 18 * * *"
