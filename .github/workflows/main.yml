@@ -12,3 +12,15 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
       - run: zig build
       - run: zig build test
+
+  dagger-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run tests
+        uses: dagger/dagger-for-github@v6
+        with:
+          verb: call
+          args: test
