@@ -1,5 +1,23 @@
 name: CI
-on: [push, pull_request]
+
+on:
+  create:
+  push:
+    branches: master
+    paths:
+      - '**.zig'
+      - '*.zig.zon'
+      - dagger
+      - dagger.json
+  pull_request:
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
