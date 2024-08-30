@@ -23,6 +23,7 @@ type ZigIoUringHttpServer struct{}
 
 // Run the tests
 func (m *ZigIoUringHttpServer) Test(ctx context.Context,
+	// +defaultPath="."
 	src *dagger.Directory,
 	// +optional
 	platform dagger.Platform,
