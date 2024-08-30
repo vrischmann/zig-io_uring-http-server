@@ -38,6 +38,8 @@ func (m *ZigIoUringHttpServer) Test(ctx context.Context,
 		WithWorkdir("/src").
 		WithDirectory("/src", src).
 		WithMountedCache("/src/.zig-cache", dag.CacheVolume("src-zig-cache")).
-		WithExec([]string{"/app/zig-master/zig", "build", "test", "--summary", "all"}).
+		WithExec([]string{"/app/zig-master/zig", "build", "test", "--summary", "all"}, dagger.ContainerWithExecOpts{
+			InsecureRootCapabilities: true,
+		}).
 		Stdout(ctx)
 }
