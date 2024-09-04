@@ -18,40 +18,25 @@ pub fn build(b: *std.Build) void {
 
     //
 
-    const picohttp_flags: []const []const u8 = switch (optimize) {
-        .Debug => &.{},
-        .ReleaseFast, .ReleaseSafe => &.{
-            "-O3",
-        },
-        .ReleaseSmall => &.{
-            "-O0",
-        },
-    };
+    const picohttp_dep = b.dependency("picohttpparser", .{});
+    const picohttp = picohttp_dep.artifact("picohttpparser");
+    const picohttp_mod = picohttp_dep.module("picohttpparser");
 
-    const picohttp = b.addStaticLibrary(.{
-        .name = "picohttp",
-        .target = target,
-        .optimize = optimize,
-    });
-    picohttp.addCSourceFile(.{
-        .file = b.path("src/picohttpparser.c"),
-        .flags = picohttp_flags,
-    });
-    picohttp.linkLibC();
+    const args_dep = b.dependency("zig-args", .{});
+    const args_mod = args_dep.module("args");
 
     //
 
-    const args = b.dependency("zig-args", .{});
-
     const exe = b.addExecutable(.{
         .name = "httpserver",
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .root_source_file = b.path("src/main.zig"),
     });
-    exe.root_module.addImport("args", args.module("args"));
-    exe.addIncludePath(b.path("src"));
+    exe.linkLibC();
     exe.linkLibrary(picohttp);
+    exe.root_module.addImport("args", args_mod);
+    exe.root_module.addImport("picohttpparser", picohttp_mod);
     exe.root_module.addImport("build_options", build_options.createModule());
     b.installArtifact(exe);
 
@@ -60,9 +45,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    tests.addIncludePath(b.path("src"));
     tests.linkSystemLibrary("curl");
+    tests.linkLibC();
     tests.linkLibrary(picohttp);
+    tests.root_module.addImport("picohttpparser", picohttp_mod);
     tests.root_module.addImport("build_options", build_options.createModule());
     const run_tests = b.addRunArtifact(tests);
 

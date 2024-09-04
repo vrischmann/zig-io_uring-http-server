@@ -19,6 +19,7 @@ const io_uring_sqe = std.os.linux.io_uring_sqe;
 const httpserver = @import("lib.zig");
 
 const argsParser = @import("args");
+const picohttp = @import("picohttpparser");
 
 const logger = std.log.scoped(.main);
 
@@ -87,7 +88,7 @@ const ServerContext = struct {
             return httpserver.Response{
                 .send_file = .{
                     .status_code = .ok,
-                    .headers = &[_]httpserver.Header{},
+                    .headers = &[_]picohttp.RawHeader{},
                     .path = req.path[1..],
                 },
             };
@@ -95,7 +96,7 @@ const ServerContext = struct {
             return httpserver.Response{
                 .response = .{
                     .status_code = .ok,
-                    .headers = &[_]httpserver.Header{},
+                    .headers = &[_]picohttp.RawHeader{},
                     .data = "Hello, World in handler!",
                 },
             };

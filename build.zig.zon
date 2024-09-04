@@ -7,5 +7,9 @@
             .url = "https://github.com/ikskuh/zig-args/archive/0abdd6947a70e6d8cc83b66228cea614aa856206.zip",
             .hash = "1220411a8c46d95bbf3b6e2059854bcb3c5159d428814099df5294232b9980517e9c",
         },
+        .picohttpparser = .{
+            .url = "https://github.com/vrischmann/zig-picohttpparser/archive/6d206c88a9f757e7403547f304b45957694049c3.zip",
+            .hash = "12209d8fb8a3298a06d9842933b33378d6c30fb7200a6064f0585f9acd313d0890e1",
+        },
     },
 }

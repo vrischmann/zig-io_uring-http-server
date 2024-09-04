@@ -11,6 +11,7 @@ const posix = std.posix;
 const Atomic = std.atomic.Value;
 const assert = std.debug.assert;
 
+const picohttp = @import("picohttpparser");
 const httpserver = @import("lib.zig");
 
 const curl = @import("curl.zig");
@@ -137,7 +138,7 @@ test "GET 200 OK" {
                     return httpserver.Response{
                         .response = .{
                             .status_code = .ok,
-                            .headers = &[_]httpserver.Header{},
+                            .headers = &[_]picohttp.RawHeader{},
                             .data = "Hello, World!",
                         },
                     };
@@ -182,7 +183,7 @@ test "POST 200 OK" {
                 return httpserver.Response{
                     .response = .{
                         .status_code = .ok,
-                        .headers = &[_]httpserver.Header{},
+                        .headers = &[_]picohttp.RawHeader{},
                         .data = "Hello, World!",
                     },
                 };
@@ -225,7 +226,7 @@ test "GET files" {
                 return httpserver.Response{
                     .send_file = .{
                         .status_code = .ok,
-                        .headers = &[_]httpserver.Header{},
+                        .headers = &[_]picohttp.RawHeader{},
                         .path = path,
                     },
                 };

@@ -11,6 +11,8 @@ const os = std.os;
 const time = std.time;
 const posix = std.posix;
 
+const picohttp = @import("picohttpparser");
+
 const Atomic = std.atomic.Value;
 const assert = std.debug.assert;
 
@@ -26,10 +28,6 @@ const Callback = @import("callback.zig").Callback;
 const logger = std.log.scoped(.main);
 
 /// HTTP types and stuff
-const c = @cImport({
-    @cInclude("picohttpparser.h");
-});
-
 pub const Method = enum(u4) {
     get,
     head,
@@ -153,30 +151,25 @@ pub const StatusCode = enum(u10) {
     }
 };
 
-pub const Header = struct {
-    name: []const u8,
-    value: []const u8,
-};
-
 pub const Headers = struct {
-    storage: [RawRequest.max_headers]Header,
-    view: []Header,
+    storage: [picohttp.RawRequest.max_headers]picohttp.RawHeader,
+    view: []picohttp.RawHeader,
 
-    fn create(req: RawRequest) !Headers {
-        assert(req.num_headers < RawRequest.max_headers);
+    fn create(req: picohttp.RawRequest) !Headers {
+        assert(req.num_headers < picohttp.RawRequest.max_headers);
 
         var res = Headers{
             .storage = undefined,
             .view = undefined,
         };
 
-        const num_headers = req.copyHeaders(&res.storage);
+        const num_headers = try req.copyHeaders(&res.storage);
         res.view = res.storage[0..num_headers];
 
         return res;
     }
 
-    pub fn get(self: Headers, name: []const u8) ?Header {
+    pub fn get(self: Headers, name: []const u8) ?picohttp.RawHeader {
         for (self.view) |item| {
             if (ascii.eqlIgnoreCase(name, item.name)) {
                 return item;
@@ -185,101 +178,6 @@ pub const Headers = struct {
         return null;
     }
 };
-
-/// Request type contains fields populated by picohttpparser and provides
-/// helpers methods for easier use with Zig.
-const RawRequest = struct {
-    const Self = @This();
-
-    const max_headers = 100;
-
-    method: [*c]u8 = undefined,
-    method_len: usize = undefined,
-    path: [*c]u8 = undefined,
-    path_len: usize = undefined,
-    minor_version: c_int = 0,
-    headers: [max_headers]c.phr_header = undefined,
-    num_headers: usize = max_headers,
-
-    fn getMethod(self: Self) []const u8 {
-        return self.method[0..self.method_len];
-    }
-
-    fn getPath(self: Self) []const u8 {
-        return self.path[0..self.path_len];
-    }
-
-    fn getMinorVersion(self: Self) usize {
-        return @as(usize, @intCast(self.minor_version));
-    }
-
-    fn copyHeaders(self: Self, headers: []Header) usize {
-        assert(headers.len >= self.num_headers);
-
-        var i: usize = 0;
-        while (i < self.num_headers) : (i += 1) {
-            const hdr = self.headers[i];
-
-            const name = hdr.name[0..hdr.name_len];
-            const value = hdr.value[0..hdr.value_len];
-
-            headers[i].name = name;
-            headers[i].value = value;
-        }
-
-        return self.num_headers;
-    }
-
-    fn getContentLength(self: Self) !?usize {
-        var i: usize = 0;
-        while (i < self.num_headers) : (i += 1) {
-            const hdr = self.headers[i];
-
-            const name = hdr.name[0..hdr.name_len];
-            const value = hdr.value[0..hdr.value_len];
-
-            if (!std.ascii.eqlIgnoreCase(name, "Content-Length")) {
-                continue;
-            }
-            return try fmt.parseInt(usize, value, 10);
-        }
-        return null;
-    }
-};
-
-const ParseRequestResult = struct {
-    raw_request: RawRequest,
-    consumed: usize,
-};
-
-fn parseRequest(previous_buffer_len: usize, buffer: []const u8) !?ParseRequestResult {
-    var req = RawRequest{};
-
-    const res = c.phr_parse_request(
-        buffer.ptr,
-        buffer.len,
-        &req.method,
-        &req.method_len,
-        &req.path,
-        &req.path_len,
-        &req.minor_version,
-        &req.headers,
-        &req.num_headers,
-        previous_buffer_len,
-    );
-    if (res == -1) {
-        // TODO(vincent): don't panic, proper cleanup instead
-        std.debug.panic("parse error\n", .{});
-    }
-    if (res == -2) {
-        return null;
-    }
-
-    return ParseRequestResult{
-        .raw_request = req,
-        .consumed = @as(usize, @intCast(res)),
-    };
-}
 
 /// Contains peer information for a request.
 pub const Peer = struct {
@@ -295,7 +193,7 @@ pub const Request = struct {
     headers: Headers,
     body: ?[]const u8,
 
-    fn create(req: RawRequest, body: ?[]const u8) !Request {
+    fn create(req: picohttp.RawRequest, body: ?[]const u8) !Request {
         return Request{
             .method = try Method.fromString(req.getMethod()),
             .path = req.getPath(),
@@ -311,13 +209,13 @@ pub const Response = union(enum) {
     /// The response is a simple buffer.
     response: struct {
         status_code: StatusCode,
-        headers: []Header,
+        headers: []picohttp.RawHeader,
         data: []const u8,
     },
     /// The response is a static file that will be read from the filesystem.
     send_file: struct {
         status_code: StatusCode,
-        headers: []Header,
+        headers: []picohttp.RawHeader,
         path: []const u8,
     },
 };
@@ -343,7 +241,7 @@ const ResponseStateFileDescriptor = union(enum) {
 
 const ClientState = struct {
     const RequestState = struct {
-        parse_result: ParseRequestResult = .{
+        parse_result: picohttp.ParseRequestResult = .{
             .raw_request = .{},
             .consumed = 0,
         },
@@ -356,7 +254,7 @@ const ClientState = struct {
     const ResponseState = struct {
         /// status code and header are overwritable in the handler
         status_code: StatusCode = .ok,
-        headers: []Header = &[_]Header{},
+        headers: []picohttp.RawHeader = &[_]picohttp.RawHeader{},
 
         /// state used when we need to send a static file from the filesystem.
         file: struct {
@@ -940,7 +838,7 @@ pub fn Server(comptime Context: type) type {
             const previous_len = client.buffer.items.len;
             try client.buffer.appendSlice(client.temp_buffer[0..read]);
 
-            if (try parseRequest(previous_len, client.buffer.items)) |result| {
+            if (try picohttp.parseRequest(previous_len, client.buffer.items)) |result| {
                 client.request_state.parse_result = result;
                 try processRequest(self, client);
             } else {
