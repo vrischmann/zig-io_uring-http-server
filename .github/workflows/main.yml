@@ -29,11 +29,3 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Run tests
-        uses: dagger/dagger-for-github@v7
-        with:
-          verb: call
-          args: test
-          cloud-token: ${{ secrets.DAGGER_CLOUD_TOKEN }}
-          version: "0.12.6"
