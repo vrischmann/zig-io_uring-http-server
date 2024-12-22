@@ -8,8 +8,8 @@
             .hash = "1220411a8c46d95bbf3b6e2059854bcb3c5159d428814099df5294232b9980517e9c",
         },
         .picohttpparser = .{
-            .url = "git+https://github.com/vrischmann/zig-picohttpparser#d0a41913a3b234d57e7bf80ee90d438871a379b5",
-            .hash = "122043f72d89da252b615800846219a1fbc6a1c1e4bf149cd9b67cf4326300f99f23",
+            .url = "git+https://github.com/vrischmann/zig-picohttpparser?ref=master#44e272978e35dcdfbf63eae5a16f4f08310ebe44",
+            .hash = "12200ff39fc0675e8e9e08c78c76736ec0205acdba07e28c642d221edb2848c9ec85",
         },
     },
 }
