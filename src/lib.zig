@@ -838,7 +838,7 @@ pub fn Server(comptime Context: type) type {
             const previous_len = client.buffer.items.len;
             try client.buffer.appendSlice(client.temp_buffer[0..read]);
 
-            if (try picohttp.parseRequest(previous_len, client.buffer.items)) |result| {
+            if (try picohttp.parseRequest(client.buffer.items, previous_len)) |result| {
                 client.request_state.parse_result = result;
                 try processRequest(self, client);
             } else {
