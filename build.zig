@@ -18,9 +18,8 @@ pub fn build(b: *std.Build) void {
 
     //
 
-    const picohttp_dep = b.dependency("picohttpparser", .{});
-    const picohttp = picohttp_dep.artifact("picohttpparser");
-    const picohttp_mod = picohttp_dep.module("picohttpparser");
+    const picohttpparser_dep = b.dependency("picohttpparser", .{});
+    const picohttpparser_mod = picohttpparser_dep.module("picohttpparser");
 
     const args_dep = b.dependency("zig-args", .{});
     const args_mod = args_dep.module("args");
@@ -34,9 +33,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.linkLibC();
-    exe.linkLibrary(picohttp);
     exe.root_module.addImport("args", args_mod);
-    exe.root_module.addImport("picohttpparser", picohttp_mod);
+    exe.root_module.addImport("picohttpparser", picohttpparser_mod);
     exe.root_module.addImport("build_options", build_options.createModule());
     b.installArtifact(exe);
 
@@ -47,8 +45,7 @@ pub fn build(b: *std.Build) void {
     });
     tests.linkSystemLibrary("curl");
     tests.linkLibC();
-    tests.linkLibrary(picohttp);
-    tests.root_module.addImport("picohttpparser", picohttp_mod);
+    tests.root_module.addImport("picohttpparser", picohttpparser_mod);
     tests.root_module.addImport("build_options", build_options.createModule());
     const run_tests = b.addRunArtifact(tests);
 
