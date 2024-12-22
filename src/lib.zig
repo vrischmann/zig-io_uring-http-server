@@ -11,7 +11,7 @@ const os = std.os;
 const time = std.time;
 const posix = std.posix;
 
-const picohttp = @import("picohttpparser");
+const picohttpparser = @import("picohttpparser");
 
 const Atomic = std.atomic.Value;
 const assert = std.debug.assert;
@@ -152,11 +152,11 @@ pub const StatusCode = enum(u10) {
 };
 
 pub const Headers = struct {
-    storage: [picohttp.RawRequest.max_headers]picohttp.RawHeader,
-    view: []picohttp.RawHeader,
+    storage: [picohttpparser.RawRequest.max_headers]picohttpparser.RawHeader,
+    view: []picohttpparser.RawHeader,
 
-    fn create(req: picohttp.RawRequest) !Headers {
-        assert(req.num_headers < picohttp.RawRequest.max_headers);
+    fn create(req: picohttpparser.RawRequest) !Headers {
+        assert(req.num_headers < picohttpparser.RawRequest.max_headers);
 
         var res = Headers{
             .storage = undefined,
@@ -169,7 +169,7 @@ pub const Headers = struct {
         return res;
     }
 
-    pub fn get(self: Headers, name: []const u8) ?picohttp.RawHeader {
+    pub fn get(self: Headers, name: []const u8) ?picohttpparser.RawHeader {
         for (self.view) |item| {
             if (ascii.eqlIgnoreCase(name, item.name)) {
                 return item;
@@ -193,7 +193,7 @@ pub const Request = struct {
     headers: Headers,
     body: ?[]const u8,
 
-    fn create(req: picohttp.RawRequest, body: ?[]const u8) !Request {
+    fn create(req: picohttpparser.RawRequest, body: ?[]const u8) !Request {
         return Request{
             .method = try Method.fromString(req.getMethod()),
             .path = req.getPath(),
@@ -209,13 +209,13 @@ pub const Response = union(enum) {
     /// The response is a simple buffer.
     response: struct {
         status_code: StatusCode,
-        headers: []picohttp.RawHeader,
+        headers: []picohttpparser.RawHeader,
         data: []const u8,
     },
     /// The response is a static file that will be read from the filesystem.
     send_file: struct {
         status_code: StatusCode,
-        headers: []picohttp.RawHeader,
+        headers: []picohttpparser.RawHeader,
         path: []const u8,
     },
 };
@@ -241,7 +241,7 @@ const ResponseStateFileDescriptor = union(enum) {
 
 const ClientState = struct {
     const RequestState = struct {
-        parse_result: picohttp.ParseRequestResult = .{
+        parse_result: picohttpparser.ParseRequestResult = .{
             .raw_request = .{},
             .consumed = 0,
         },
@@ -254,7 +254,7 @@ const ClientState = struct {
     const ResponseState = struct {
         /// status code and header are overwritable in the handler
         status_code: StatusCode = .ok,
-        headers: []picohttp.RawHeader = &[_]picohttp.RawHeader{},
+        headers: []picohttpparser.RawHeader = &[_]picohttpparser.RawHeader{},
 
         /// state used when we need to send a static file from the filesystem.
         file: struct {
@@ -838,7 +838,7 @@ pub fn Server(comptime Context: type) type {
             const previous_len = client.buffer.items.len;
             try client.buffer.appendSlice(client.temp_buffer[0..read]);
 
-            if (try picohttp.parseRequest(client.buffer.items, previous_len)) |result| {
+            if (try picohttpparser.parseRequest(client.buffer.items, previous_len)) |result| {
                 client.request_state.parse_result = result;
                 try processRequest(self, client);
             } else {
