@@ -4,13 +4,13 @@
     .version = "0.1.0",
     .paths = .{"."},
     .dependencies = .{
-        .@"zig-args" = .{
-            .url = "https://github.com/ikskuh/zig-args/archive/0abdd6947a70e6d8cc83b66228cea614aa856206.zip",
-            .hash = "1220411a8c46d95bbf3b6e2059854bcb3c5159d428814099df5294232b9980517e9c",
-        },
         .picohttpparser = .{
             .url = "git+https://github.com/vrischmann/zig-picohttpparser?ref=master#44e272978e35dcdfbf63eae5a16f4f08310ebe44",
             .hash = "12200ff39fc0675e8e9e08c78c76736ec0205acdba07e28c642d221edb2848c9ec85",
+        },
+        .args = .{
+            .url = "git+https://github.com/vrischmann/zig-args?ref=fix-latest-zig#2f948fa0292a4bc2a51f1db2a4660802bec4ab32",
+            .hash = "args-0.0.0-CiLiqv_NAAC97fGpk9hS2K681jkiqPsWP6w3ucb_ctGH",
         },
     },
 }

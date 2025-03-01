@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) void {
     const picohttpparser_dep = b.dependency("picohttpparser", .{});
     const picohttpparser_mod = picohttpparser_dep.module("picohttpparser");
 
-    const args_dep = b.dependency("zig-args", .{});
+    const args_dep = b.dependency("args", .{});
     const args_mod = args_dep.module("args");
 
     //
