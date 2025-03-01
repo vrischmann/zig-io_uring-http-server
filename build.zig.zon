@@ -5,8 +5,8 @@
     .paths = .{"."},
     .dependencies = .{
         .picohttpparser = .{
-            .url = "git+https://github.com/vrischmann/zig-picohttpparser?ref=master#44e272978e35dcdfbf63eae5a16f4f08310ebe44",
-            .hash = "12200ff39fc0675e8e9e08c78c76736ec0205acdba07e28c642d221edb2848c9ec85",
+            .url = "git+https://github.com/vrischmann/zig-picohttpparser?ref=master#10c7b6dc4448a543cbce8c3f8fbbcf38cd4d4eb8",
+            .hash = "picohttpparser-0.0.0-qPswf6shAADd5ObNTJiFFKGJMtRm2gK9BX9kmWWc1WLN",
         },
         .args = .{
             .url = "git+https://github.com/vrischmann/zig-args?ref=fix-latest-zig#2f948fa0292a4bc2a51f1db2a4660802bec4ab32",
