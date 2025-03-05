@@ -1,6 +1,7 @@
 .{
     .name = .io_uring_http_server,
     .fingerprint = 0x3e0e9b80905d08e1,
+    .minimum_zig_version = "0.14.0",
     .version = "0.1.0",
     .paths = .{"."},
     .dependencies = .{
