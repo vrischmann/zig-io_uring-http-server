@@ -6,8 +6,8 @@ const io = std.io;
 const mem = std.mem;
 const net = std.net;
 const os = std.os;
-const time = std.time;
 const posix = std.posix;
+const time = std.time;
 
 const Atomic = std.atomic.Value;
 const assert = std.debug.assert;
@@ -28,11 +28,11 @@ var global_running: Atomic(bool) = Atomic(bool).init(true);
 fn addSignalHandlers() !void {
     // Ignore broken pipes
     {
-        var act = posix.Sigaction{
+        const act = posix.Sigaction{
             .handler = .{
                 .handler = posix.SIG.IGN,
             },
-            .mask = posix.empty_sigset,
+            .mask = posix.sigemptyset(),
             .flags = 0,
         };
         posix.sigaction(posix.SIG.PIPE, &act, null);
@@ -50,7 +50,7 @@ fn addSignalHandlers() !void {
                     }
                 }.wrapper,
             },
-            .mask = posix.empty_sigset,
+            .mask = posix.sigemptyset(),
             .flags = 0,
         };
         posix.sigaction(posix.SIG.TERM, &act, null);
